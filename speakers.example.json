@@ -1,0 +1,21 @@
+{
+  "张三": [
+    {
+      "wav": "/path/to/录音A-16k.wav",
+      "segs": "/path/to/录音A.segs.json",
+      "cluster": 0
+    }
+  ],
+  "李四": [
+    {
+      "wav": "/path/to/录音A-16k.wav",
+      "segs": "/path/to/录音A.segs.json",
+      "cluster": 1
+    },
+    {
+      "wav": "/path/to/录音B-16k.wav",
+      "segs": "/path/to/录音B.segs.json",
+      "cluster": 2
+    }
+  ]
+}

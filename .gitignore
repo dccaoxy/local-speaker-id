@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 模型（体积大，且不属于项目内容）
+*.onnx
+*.tar.bz2
+models/
+
+# 音频与中间产物（可能含隐私）
+*.wav
+*.mp3
+*.m4a
+*.opus
+*.aac
+*.flac
+work/
+out/
+*.segs.json
+
+# 声纹库与个人配置（绝对不能提交）
+db/
+*.npz
+speakers.json
+protos.npz
+
+# 系统
+.DS_Store
