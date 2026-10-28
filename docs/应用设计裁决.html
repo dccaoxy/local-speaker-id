@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>录音自动识别应用 · 设计裁决</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212a; --line:#2a2f3a;
+    --text:#e8ecf3; --muted:#98a2b3; --accent:#6ea8fe; --ok:#4ade80;
+    --warn:#fbbf24; --bad:#f87171; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:-apple-system,"PingFang SC","Helvetica Neue",Arial,sans-serif;
+       line-height:1.75;font-size:15px}
+  .wrap{max-width:1020px;margin:0 auto;padding:46px 28px 80px}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.5px}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:28px}
+  h2{font-size:19px;margin:42px 0 14px;padding-left:11px;border-left:3px solid var(--accent)}
+  p{margin:10px 0}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--muted);font-weight:600;font-size:13px}
+  code{font-family:var(--mono);background:#20242e;border:1px solid var(--line);
+       border-radius:5px;padding:1px 5px;font-size:12.5px;color:#c9d6e8}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .verdict{background:linear-gradient(135deg,#16324a,#141a24);border:1px solid #2b4664;
+           border-radius:14px;padding:20px 24px;margin:22px 0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0}
+  .card h3{margin:0 0 8px;font-size:15px}
+  ul{margin:8px 0;padding-left:22px} li{margin:5px 0}
+  .wire{font-family:var(--mono);font-size:12.5px;color:#a8b3c5;background:#12151b;
+        border:1px solid var(--line);border-radius:10px;padding:14px 16px;white-space:pre;
+        overflow-x:auto;line-height:1.9}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 8px;border-radius:20px;
+       border:1px solid var(--line);color:var(--muted);margin-left:6px}
+  .tag.no{color:var(--bad);border-color:#5a2a2e}
+  .tag.yes{color:#0f1115;background:var(--ok);border-color:var(--ok);font-weight:600}
+  .risk{background:#2a1618;border:1px solid #6b2a30;border-radius:10px;padding:14px 18px;margin:10px 0}
+  .risk b{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>录音自动识别应用 · 设计裁决</h1>
+  <div class="sub">五个角色（产品 / 交互 / 架构 / 算法 / 评审）讨论后的裁决结果 · 2026-10-28</div>
+
+  <div class="verdict">
+    <b>第一版就长这样：</b>每晚扫一次 <code>~/OneDrive/数据库/录音/</code>，把当天录音跑成「<b>未知A / 未知B</b> + 每条 12 秒可确认卡片」的本地网页。确认只改名字、不重跑分离；原始分数全进台账、不进界面。<br>
+    <span class="muted">不做新人自动判定、不做长会议分段、不做实时进度、不做撤销回滚。</span><br>
+    <b>核心取舍：宁可标「未知」，绝不猜。</b>这是唯一一条四个角色没有分歧的判断。
+  </div>
+
+  <h2>一、五个角色各自最硬的一条</h2>
+  <table>
+    <tr><th>角色</th><th>最硬的主张</th><th>裁决</th></tr>
+    <tr><td>产品</td><td>静默优先：错名会被当成事实引用，且错得毫无痕迹；「未知」是可补的待办</td><td class="ok">采纳，作为第一原则</td></tr>
+    <tr><td>交互</td><td>必须有「不确定，先留着」出口，否则用户会随便点个名字把卡关掉——这是唯一会静默污染数据的路径</td><td class="ok">采纳，与「新人入库」并列</td></tr>
+    <tr><td>架构</td><td>launchd 常驻 + SQLite 两表 + 单 worker 串行（并发会 OOM）</td><td class="ok">采纳，但砍到两张表</td></tr>
+    <tr><td>算法</td><td>新增观测量 ρ（簇内一致窗比例），判断这簇是不是混合物</td><td class="ok">采纳，便宜且有效</td></tr>
+    <tr><td>评审</td><td>真正的杀手不是漏认，是假阳性；且现在的原型缓存永不失效，功能已死还显示正常</td><td class="ok">采纳，见风险 R1</td></tr>
+  </table>
+
+  <h2>二、六个硬冲突，以及怎么裁的</h2>
+  <table>
+    <tr><th>冲突</th><th>怎么裁</th></tr>
+    <tr>
+      <td>分级数：产品三档 / 算法四级 / 代码二值</td>
+      <td><b>算分用四级，呈现用三档。</b>分档是打分函数的返回值，不是界面状态；混在一起必然长出第二套阈值。</td>
+    </tr>
+    <tr>
+      <td>要不要显示相似度数字</td>
+      <td><b>界面一个数字都不出现，但台账必须存原始 s1/s2/ρ/N。</b>算法要靠这些做阈值重标定，不存等于把标定能力一次烧掉。</td>
+    </tr>
+    <tr>
+      <td>确认卡片放什么</td>
+      <td>取交互的方案：<b>跨段拼 12 秒 + 可换段 + 四按钮</b>（是X / 不是选人 / 新人入库 / 不确定先留着）。「3 句转写」本周做不到，见风险 R3。</td>
+    </tr>
+    <tr>
+      <td>没确认前要不要先出稿</td>
+      <td><b>先出稿</b>，但文件名和首行带 <code>unconfirmed</code>，正文写「未知A」不写人名。不猜 ≠ 不出。</td>
+    </tr>
+    <tr>
+      <td>新人要不要自动判定</td>
+      <td><b>本周不做。</b>判定依赖「本场信道天花板」，而它需要 20 个正样本，我们只有 4 个标注点。降级成用户点「不是上面的人」→ 新建。判定变用户动作，算法不抢跑。</td>
+    </tr>
+    <tr>
+      <td>长会议分离现在修不修</td>
+      <td><b>不修。</b>分段会改变分数的语义，跟「先补标定」直接冲突。只加 3 行兜底：音频 &gt;30 分钟打 <code>long_audio_unreliable</code> 标记，让产出自己承认不可信。</td>
+    </tr>
+  </table>
+
+  <h2>三、界面（就一页）</h2>
+  <div class="wire">127.0.0.1:8765
+
+┌────────────────────────────────────────────────┐
+│ 今天 3 段录音 · 还剩 2 个说话人没确认            │
+├────────────────────────────────────────────────┤
+│ 14:17 讨论 回款流程 · 24 分钟 · 4 个人 · ⟳ 处理中│
+│ 09:02 面试 售前候选 · 27 分钟 · 2 个人 · ✓ 已完成│
+│ 08:30 电话 山西案子 · 25 分钟 · 2 个人 · ⚠ 待确认│
+└────────────────────────────────────────────────┘
+
+点进「待确认」→ 一张卡一屏：
+
+┌────────────────────────────────────────────────┐
+│ [色块A]  说话人A · 说了 18 分 20 秒（76%）       │
+│                                                │
+│ ▶ 听 12 秒   换一段                             │
+│ 「那咱们这个价格…」                             │
+│ 「你先按这个走…」                               │
+│                                                │
+│ 这是谁？                                        │
+│ [ 曹晓雨 ]        ← 灰边，小字「声音很像」       │
+│ [ 不是上面的人 ]                                │
+│     └ 张彤 / 金雪竹 / 新建一个名字 [____]        │
+│     └ 一次性的人，不记声纹                       │
+│     └ 不确定，先留着                            │
+└────────────────────────────────────────────────┘</div>
+  <p><b>点完立刻重写稿子</b>，不设「全部确认」闸门——中途关掉标签页就全丢了。改名字是改一行台账再重渲染，不重跑分离。</p>
+  <p>通知只在「处理完 且 还有未确认簇」时发一条，点击直达该录音的卡片页。全部自动识别成功的不通知，静默出稿。一天不处理不催。</p>
+
+  <h2>四、置信度规则（唯一配置源，全部模块 import）</h2>
+  <div class="wire">T_AUTO  = 0.44    # ≥0.44 且 margin≥0.05 且 ρ≥0.70 且 N≥20 → 静默落名
+T_ASK   = 0.36    # 0.36~0.44 → 出卡片问你；<0.36 → 直接标未知，不打扰
+MARGIN  = 0.05
+RHO_MIN = 0.70
+N_MIN   = 20</div>
+  <table>
+    <tr><th>级别</th><th>条件</th><th>界面</th></tr>
+    <tr><td class="ok">高</td><td>s1≥0.44 ∧ m≥0.05 ∧ ρ≥0.70 ∧ N≥20</td><td>直接写名字，不打扰，保留「改」入口</td></tr>
+    <tr><td class="warn">中</td><td>0.40≤s1&lt;0.44，或 s1≥0.44 但 ρ&lt;0.70 / N&lt;20</td><td>「张三?」+ 一键确认</td></tr>
+    <tr><td class="warn">低</td><td>0.36≤s1&lt;0.40，或 ρ&lt;0.50</td><td>「说话人3」+ 候选列表，必须回答</td></tr>
+    <tr><td>未知</td><td>s1&lt;0.36 ∨ N&lt;6 ∨ 时长&lt;4s</td><td>只显示「说话人3」，不提问</td></tr>
+  </table>
+  <p>依据实测四点：正例最低 0.456、最近负例 0.345、另两个负例 0.264 / 0.261。0.44 在正例下方 0.016，0.36 在负例上方 0.015，两侧都留了垫子。<b>原来代码里的 0.70 和文档里的 0.45 全部作废。</b></p>
+
+  <h2>五、数据模型（两张表 + 一个台账，够了）</h2>
+  <div class="wire">~/.voiceprint/state.db (WAL)
+
+files      id / path / size / mtime / status / audio_sec / n_clusters / flag / updated_at
+           status: discovered → queued → processing → awaiting_review → finalized / failed
+
+decisions  id / file_id / cluster_idx / spans(JSON) / seconds / nwin
+           / sim / second / rho / sys_verdict / user_verdict / persist / ts
+
+产物：
+  录音/<同名>.说话人.md        渲染产物，可随时重生成
+  录音/<同名>.segs.json        分离结果
+  db/protos/<人>.npz           每个窗向量旁存 source_id</div>
+  <p><code>decisions</code> 是事实源，md 只是渲染结果。改名 = 改一行 + 重渲染；<code>spans</code> 必须存，否则「先留着」的簇日后无法回溯重算。</p>
+
+  <h2>六、一周清单（按依赖顺序）</h2>
+  <table>
+    <tr><th>#</th><th>做什么</th><th>落在哪</th></tr>
+    <tr><td>1</td><td>decide() 返回 s1/s2/N/ρ 并出四级，补 ρ 计算</td><td><code>winmatch.py</code></td></tr>
+    <tr><td>2</td><td>删掉内联的贪心判定，改调 decide()——顺手消灭三处阈值不一致</td><td><code>identify.py:246</code></td></tr>
+    <tr><td>3</td><td>原型缓存加 key（来源 path+size+mtime），修「永不失效」</td><td><code>winmatch.py:80</code></td></tr>
+    <tr><td>4</td><td>build_protos 与 score_spans 复用同一个 extractor</td><td><code>winmatch.py:91/119</code></td></tr>
+    <tr><td>5</td><td>原型 npz 加 source_id，支持按来源删除</td><td><code>winmatch.py</code></td></tr>
+    <tr><td>6</td><td>files + decisions 两张表</td><td>新建 <code>src/db.py</code></td></tr>
+    <tr><td>7</td><td>定时扫目录 + 三重稳定闸入队，排除 *.md/*.json 防自触发</td><td>新建 <code>src/watch.py</code></td></tr>
+    <tr><td>8</td><td>串行消费 → 调 identify.py → 落 unconfirmed 稿</td><td>新建 <code>src/worker.py</code></td></tr>
+    <tr><td>9</td><td>本地页面：列表 + 卡片 + 四按钮 + 写台账</td><td>新建 <code>src/app.py</code></td></tr>
+    <tr><td>10</td><td>菜单栏只显示待确认条数</td><td>新建 <code>scripts/sentinel.py</code></td></tr>
+    <tr><td>11</td><td>标定小工具：攒 20 正 / 30 负</td><td><code>make calibrate</code></td></tr>
+  </table>
+  <p>第 11 项最该做，却是所有人最初都漏排的。没有它，0.44 这个数永远是拍的。</p>
+
+  <h2>七、五个被集体忽略的致命风险</h2>
+  <div class="risk">
+    <p><b>R1 原型缓存永不失效（已核实）</b>：<code>build_protos</code> 只看 npz 存不存在。注册新人后旧缓存照用，<b>新人永远识别不出，且零报错</b>——功能已死，界面显示一切正常。</p>
+  </div>
+  <div class="risk">
+    <p><b>R2 确认不可逆（已核实）</b>：npz 是整体覆盖写，并进去的窗既无法定位也无法摘除。错认一次永久污染该人原型。要做撤销，窗向量必须带 span。</p>
+  </div>
+  <div class="risk">
+    <p><b>R3 ASR 不在管道里</b>：应用只读现成转写稿，自身没有转写能力。手机录音、内录 opus 没有配套 md 时，<b>卡片上「3 句转写」是空的</b>。本周只能降级成「只听 12 秒，不看文字」。</p>
+  </div>
+  <div class="risk">
+    <p><b>R4 自触发循环</b>：稿子和 segs.json 写在录音同目录，扫描器不排除这两类后缀，就会被自己写出的文件反复唤醒入队。</p>
+  </div>
+  <div class="risk">
+    <p><b>R5 静音窗截断误伤轻声者（已核实）</b>：<code>windows_of</code> 无条件丢掉最低 25% 能量的窗。说话轻的人 N 系统性偏低，永远达不到 N≥20，<b>永远停在「未知」</b>。</p>
+  </div>
+
+  <h2>八、我驳回评审的一条</h2>
+  <div class="card">
+    <h3 class="bad">评审主张：解除「一人只占一簇」硬互斥，允许同名多簇</h3>
+    <p><b>驳回。</b>这条互斥是我在真实数据上被假阳性打出来的补丁：面试录音里两个簇同时指向同一个人，分数 0.957 和 0.719。0.719 那个簇实际是候选人，如果放开互斥，它会被以 0.719 稳稳署上错误的名字——<b>正好是这套系统里代价最高的那种错。</b></p>
+    <p>评审的理由是「同一人可能因抢话被拆成两簇」。场景成立，但代价不对等：多标一个「未知」只是漏认，错署一个人名会污染记录。保留互斥，被挤掉的那簇标未知，让他点一下。</p>
+  </div>
+
+  <h2>八点五、这一轮定下的四条硬规则</h2>
+  <table>
+    <tr><th>项</th><th>最终决定</th><th>为什么</th></tr>
+    <tr>
+      <td>声纹数据放哪</td>
+      <td><b>必须在 <code>~/.voiceprint/db/</code>，禁止写入 OneDrive</b></td>
+      <td>声纹是生物识别信息。原来放在 <code>~/OneDrive/数据库/声纹/</code>，等于把每个人的声纹上传到个人云盘——这不是工程偏好，是合规问题。已迁移，原件待用户确认后删除</td>
+    </tr>
+    <tr>
+      <td>主指标</td>
+      <td><b>每 10 小时录音所需的人工点击数 ≤ 4</b></td>
+      <td>「静默率」会导致为了好看而放低阈值。直接数用户动作总数，没法刷。静默率降级为诊断项（≥50%）</td>
+    </tr>
+    <tr>
+      <td>ρ 怎么算</td>
+      <td><code>ρ = (argmax 指向 top1 且 best_sim ≥ T_ASK 的窗数) / N_total</code></td>
+      <td>分母必须是 N_total。<b>用「有效窗数」做分母会让「一堆窗谁都不像」的簇算出高 ρ</b>，正好和要抓的混合物相反</td>
+    </tr>
+    <tr>
+      <td>稿子里怎么区分谁判的</td>
+      <td>自动判的写 <code>*张三*</code>（斜体），人确认的写 <code>**张三**</code>（粗体），首行注明</td>
+      <td>自动判错会被当成事实引用。这个区分不能指望用户记住，必须写在纸上</td>
+    </tr>
+  </table>
+
+  <h2>八点六、还没解决但必须先认账的账</h2>
+  <ul>
+    <li><b>卡片上的文字是整套设计的地基。</b>一边听一边看字，认一个人 5 秒；只听不看要 15 秒以上，一份 4 簇的录音就从 20 秒注意力变成 3 分钟，直接冲破「每 10 小时 4 次点击」的预算。所以<b>解析伴侣转写稿（三种格式）不是增强项，是 MVP 硬需求</b>。没有它，卡片只能放音频，整套交互的成本会翻三倍。</li>
+    <li><b>「先留空」必须算作已处置。</b>若按字面实现成「未确认」，出差一周回来面对 20 张卡，用户第二次就不用了。这一条要在 <code>finalize</code> 的判定里写死。</li>
+    <li><b>阈值 0.44 不该被说成准确率。</b>界面文案一律写成「我一般要 0.44 以上才敢认」——这是系统的自我陈述，不是概率承诺。只有 4 个标注点支撑的数字，承诺准确率就是撒谎。</li>
+  </ul>
+
+  <h2>八点七、验收指标（改过两轮，这是终版）</h2>
+  <p>我最初定的两个指标是矛盾的：一边说「静默率 ≥50%」，一边说「每 10 小时人工点击数 ≤4」。做一次乘法就露馅——24 段录音 × 50% 出卡 × 2 次点击 = 24 次，差 6 倍。<b>所以不看次数，看构成：</b></p>
+  <table>
+    <tr><th>类型</th><th>定义</th><th>含义</th></tr>
+    <tr><td class="ok">A 类（有效）</td><td>点了「是 X」或「新人入库」</td><td>问对了，且买到了资产</td></tr>
+    <tr><td class="bad">B 类（空转）</td><td>点了「先留空」或直接关页</td><td>用户自己也不知道，这轮打扰零收益</td></tr>
+  </table>
+  <p><b>B 类占比 &gt;40% → 产品形态错了，不是阈值没调好。</b>这个判据比任何点击次数都硬。</p>
+  <table>
+    <tr><th>阶段</th><th>点击数</th><th>B 类占比</th></tr>
+    <tr><td>第 1 月（库 3→8 人）</td><td>≤16 次 / 10 小时录音</td><td>&lt;30%</td></tr>
+    <tr><td>第 3 月（库 ≥15 人）</td><td>≤8 次</td><td>&lt;20%</td></tr>
+    <tr><td>第 6 月</td><td>≤4 次</td><td>—</td></tr>
+  </table>
+  <p>兜底：连续 4 周、库已 ≥10 人、点击数不降且 B 类没改善 → 判形态错误。</p>
+  <div class="card">
+    <h3 class="warn">一个必须先认账的前提</h3>
+    <p>现有四段录音里，一次性人物占比很高：面试候选人是新的，案子的对手方是新的，真正重复出现的面孔只有两个。</p>
+    <p><b>所以这个产品对现阶段的价值，很可能不是「越用越准」，而是「不用手跑命令 + 记录结构化」。</b>按前者验收它，第一个月 B 类冲到 50% 就会被我误判成失败——那其实是业务结构决定的，不是产品做错了。</p>
+  </div>
+
+  <h2>八点八、界面上的三条禁令</h2>
+  <ul>
+    <li><b>任何位置不出现相似度数字</b>（含灰字、hover、调试信息）。一旦把 0.50 印出来，用户会拿去对照「0.44 才敢认」，然后连正确的数字一起不信。分数只进台账。</li>
+    <li><b>不做「以后不再问你」这类承诺。</b>跨设备分数下移是已知问题，这句承诺两周内必然被证伪，而被证伪的承诺让整页数字失信。</li>
+    <li><b>系统犹豫时，界面不能摆确定的按钮。</b>证据不足的卡只给「就按张三记（我确认）」，不给「是张三」。</li>
+  </ul>
+
+    <h2>八点九、最终判据（v6，此前所有版本作废）</h2>
+  <div class="wire">CAP = 1200                      # 窗数上限，config 里唯一定义，score 与 win_pass_rate 共用
+
+T_AUTO = 0.44   [待标定]        T_ASK = 0.36
+MARGIN = 0.05                   RHO_MIN = 0.70 [待标定]
+min_sec_ask  = 30               出卡下限（秒）
+min_sec_auto = 60               静默落名下限（秒）
+
+win_pass_rate = N_total / min(floor(seconds)-1, CAP)
+
+判定顺序（严格短路，命中即返回）
+1  N_total < 30 秒等效                    → 不出卡（too_short）
+2  单簇占比 >70% 且簇数 ≥3                → 录音级黄条，不出卡（isolation_broken）
+3  win_pass_rate < 0.40                   → 不出卡（noisy）
+4  seconds < min(60, dur×0.3)             → 静默标「说话人N」
+5  eff_sec≥60 ∧ s1≥0.44 ∧ m≥0.05 ∧ ρ≥0.70 → 静默落名
+6  s1 ≥ 0.36                              → 出卡
+7  其余（s1 低但信号干净）                 → 出卡「库里没这个人」
+                                           按 eff_sec 降序，一页最多 3 张，超出折叠可展开
+
+两个时长字段不许混用：
+eff_sec     = N_total × HOP   门槛判定只用它
+duration_s  = 簇总时长          卡片展示「说得最多 18 分 20 秒」用它
+（混用会出现「说了 18 分钟，判成太短」）</div>
+  <table>
+    <tr><th>决策</th><th>为什么</th></tr>
+    <tr><td>win_pass_rate 分母也封顶</td><td>不封顶的话长簇永远算不通过率（N_theory 4800 vs N_total 1200），这条信号对长音频彻底失效。封顶代价：超 CAP 后恒等于 1.0，失去诊断力但不误判</td></tr>
+    <tr><td>塌陷检测不用 win_pass_rate，用单簇占比</td><td>实测它分不开「都是库外人」和「分离塌了」——0422 里最大簇占比 76%，两个指标都正常/都异常。而塌陷时问「这是谁」是纯空转：那簇里根本不是一个人</td></tr>
+    <tr><td>新人卡不限 1 张，改 3 张</td><td>面试 = 面试官+候选人，拜访 = 自己+两三个客户。限 1 张会让第二个新人沉进 md 永远无人认领。用排序+折叠控密度，不用砍张数</td></tr>
+    <tr><td>折叠 ≠ 丢弃</td><td>折叠的簇要有展开入口。丢弃的永远沉没，折叠的只是排在后面</td></tr>
+    <tr><td>单位一律用秒</td><td>60 秒按 2 秒窗切是 59 个窗，差一个就在边界翻档。字段名写 <code>min_sec_*</code>，不写窗数</td></tr>
+  </table>
+
+  <div class="risk">
+    <p><b>必须写进 config 注释的一条统计事实</b>：即使 N=80，标准误 ±2SE≈0.039 也大于 T_AUTO 与最近正例之间的间隙 0.016。<b>统计上不存在「够格静默署名」的簇。</b></p>
+    <p>所以静默档的本质是：用 0.44 把可疑的推给人，接受一个残余错误率。60 秒门槛只用来挡纯噪声，不构成正确性保证。半年后有人看到 0.44 以为是准确率，会为此付出代价。</p>
+  </div>
+
+  <h2>八点十、验收指标（终版，绝对数指标已撤销）</h2>
+  <table>
+    <tr><th>#</th><th>指标</th><th>不达标说明什么</th></tr>
+    <tr><td>1</td><td>推送后 24h 打开确认页 ≥50%</td><td><b>打扰方式错了</b>（通知文案/时机），不是产品错了</td></tr>
+    <tr><td>2</td><td>打开后 B 类（空转）≤40%</td><td><b>产品形态错了</b></td></tr>
+    <tr><td>3</td><td>每个新说话人的平均点击 ≤3</td><td><b>流程有冗余</b>（理想 2 次：选人 + 确认）</td></tr>
+  </table>
+  <p>顺序不能反：分母太小时 B 类波动极大，先看打开率能避免误杀。</p>
+  <div class="card">
+    <h3 class="warn">一条方法论</h3>
+    <p>原来的「每 10 小时 ≤16 / ≤8 / ≤4 次点击」梯度表已撤销。它假设「一段录音最多一个新人」——但面试是面试官+候选人、客户拜访是自己+两三个接口人，<b>两个新人是常态</b>。按 24 段/10h 重算，实际会是 96 次，比目标高 6 倍。</p>
+    <p><b>验收指标里凡是分母含「录音时长」或「录音条数」的绝对数，先问一句：这个数由业务量决定还是由产品决定。由业务决定的，不能拿来当验收标准。</b>我们在这条上犯了两次同样的错。</p>
+  </div>
+
+<h2>九、下一版再说</h2>
+  <ul>
+    <li>新人自动判定（要 20 个正样本先）</li>
+    <li>长会议分段聚类（会改分数语义，必须先标定）</li>
+    <li>多人同名的合并 UI、批量确认、飞书通知、实时进度</li>
+    <li>接本地 whisper 补 ASR（一周做不完，但它是 R3 的正解）</li>
+  </ul>
+
+</div>
+</body>
+</html>
