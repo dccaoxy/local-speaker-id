@@ -54,3 +54,6 @@ protos.npz
 /src/m0vt0eia
 /src/oo7p8de5
 /src/qngcp_do
+
+# 本地演示（真录音，不提交）
+/.demo/

@@ -38,9 +38,12 @@ def to_wav16k(src, out_dir=None):
     os.makedirs(d, exist_ok=True)
     out = os.path.join(d, "a.wav")
     if src.lower().endswith(".wav"):
-        d, sr = sf.read(src, dtype="float32")
-        if sr == 16000 and d.ndim == 1:
-            return src
+        data, sr = sf.read(src, dtype="float32")
+        if sr == 16000 and data.ndim == 1:
+            # 已经合格也别直接把源文件路径返回出去：调用方会拿它的 dirname 当工作区，
+            # 后续 bl8/bl16.wav 就会写进**录音目录**，然后被扫描器当成新录音再跑一遍。
+            sf.write(out, data, sr)
+            return out
     r = subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", src, out],
                        capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(out):
@@ -48,12 +51,15 @@ def to_wav16k(src, out_dir=None):
     return out
 
 
-def bandlimit(wav16k):
+def bandlimit(wav16k, out_dir=None):
     """把音频压到 8k 电话带宽再升回 16k，消除不同录音设备/码率造成的信道差异。
 
     实测：同一人跨设备相似度从 0.156 提升到 0.572。不带宽归一时声纹基本不可用。
+
+    out_dir 必须指向私有工作目录。默认用源文件所在目录，而 CLI 场景下那就是录音
+    目录——中转文件写进去会被守护进程当成新录音，无限派生。
     """
-    d = os.path.dirname(wav16k)
+    d = out_dir or os.path.dirname(wav16k)
     b8 = os.path.join(d, "bl8.wav")
     b16 = os.path.join(d, "bl16.wav")
     for args in (["-f", "WAVE", "-d", "LEI16@8000", "-c", "1", wav16k, b8],

@@ -112,19 +112,19 @@ def process(path, rid, *, clusters=-1, progress=None, with_asr=True):
         log(f"{rid} {name} {pct}%")
 
     step("convert", 5)
-    wav_raw = identify.to_wav16k(path)
+    keep = os.path.join(config.WORK_DIR, rid)
+    os.makedirs(keep, exist_ok=True)
+    wav_raw = identify.to_wav16k(path, out_dir=keep)
     # 留一份 16k 单声道在本地工作区：用户确认「新人」时要拿这段音频重新入库，
     # 没有它就得多转一次码（100 分钟录音十几秒），而且入库窗口立刻变长。
     try:
-        keep = os.path.join(config.WORK_DIR, rid)
-        os.makedirs(keep, exist_ok=True)
         a16, sr16 = sf.read(wav_raw, dtype="float32")
         if a16.ndim > 1:
             a16 = a16.mean(axis=1)
         sf.write(os.path.join(keep, "a16.wav"), a16, sr16)
     except Exception as e:
         log("保留 16k 音频失败（不影响识别）：", e)
-    wav_diar = identify.bandlimit(wav_raw)
+    wav_diar = identify.bandlimit(wav_raw, out_dir=keep)
     audio, sr = sf.read(wav_diar, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)

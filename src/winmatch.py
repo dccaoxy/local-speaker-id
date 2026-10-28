@@ -285,6 +285,10 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
 
     mats, meta = _usable_matrices(protos, prov, recording, man)
     names = list(mats)
+    if not names:
+        # 库里没人（或全被同源剔除）：这时「获准静默」必须是 False。
+        # 留 True 会让 evidence 里出现 silent_ok=True 而 s1=0，台账对不上。
+        ev.silent_ok = False
     # 原型质量门控：低窗原型不参与自动 top1 排名，但仍留在人工候选列表里
     if man and man.get("people"):
         try:

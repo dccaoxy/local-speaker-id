@@ -20,8 +20,16 @@ import store
 
 AUDIO_EXT = {".mp3", ".m4a", ".opus", ".wav", ".aac", ".flac", ".amr", ".wma"}
 
+# 我们自己转码时的中间文件名。正常情况下它们只落在私有工作目录，但万一有人用
+# CLI 跑过、把 bl8/bl16 留在录音目录，扫描器必须认得出这不是新录音——
+# 否则会「处理一个文件 → 产出两个文件 → 各再处理一遍」，无限派生。
+DERIVED = {"a.wav", "a16.wav", "bl8.wav", "bl16.wav"}
+
 
 def _is_audio(p):
+    name = os.path.basename(p)
+    if name.startswith(".") or name in DERIVED:
+        return False
     return os.path.splitext(p)[1].lower() in AUDIO_EXT
 
 
