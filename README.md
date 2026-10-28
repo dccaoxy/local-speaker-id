@@ -25,12 +25,16 @@
 录音丢进目录，剩下的不用管：
 
 ```bash
+bash scripts/run.sh --check      # 先看环境：用的哪个 Python、模型在不在、库里几个人
+bash scripts/run.sh              # 启动，浏览器打开 http://127.0.0.1:8765
+
 # 装成登录自启的常驻服务（launchd）
 VP_PY=/path/to/venv/bin/python bash scripts/install_agent.sh
-
-# 手动起也行
-python src/app.py            # 浏览器打开 http://127.0.0.1:8765
 ```
+
+**不要直接 `python src/app.py`**：系统 Python 里没有 `sherpa_onnx`，报的却是
+`No module named 'fastapi'`，看起来像依赖没装，实际是解释器选错了。`run.sh` 会按
+`VP_PY` → 仓库内 `.venv` → 项目 venv → `python3` 的顺序，挑第一个真能 import 的。
 
 它每 5 秒扫一次 `~/OneDrive/数据库/录音/`（可用 `VP_RECORDINGS` 改），
 文件「大小和修改时间连续 60 秒不变」才认为同步完成，然后排队处理：

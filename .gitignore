@@ -34,3 +34,23 @@ protos.npz
 .smoke/
 .pytest_tmp/
 *.tmp.*
+
+# 沙箱/工具故障时 Python 的 tempfile 会退到当前目录，随机建 8 位名字的目录。
+# 这些不是项目内容，曾误提交过一次（commit 70d46dc），这里逐个挡住。
+/.rn_a
+/.rn_b
+/1gg5mql9
+/4k7xfx1s
+/_h0lh_jr
+/_qnpxmu7
+/ayfpf20h
+/bj6oyy8g
+/bli0odqv
+/dxss_n25
+/rd1jlkfc
+/u4t0579m
+/u7suqk4w
+/src/3ju2zrv6
+/src/m0vt0eia
+/src/oo7p8de5
+/src/qngcp_do
