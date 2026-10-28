@@ -255,7 +255,7 @@ def decide_from_evidence(ev, dur_total=None, n_recording=None):
         ev.reason, ev.ask, ev.tier, ev.name = ["few_evidence"], False, "无", None
         return ev
     if ev.duration < config.sec_threshold(d):
-        ev.reason, ev.ask, ev.tier, ev.name = ["short"], False, "无", None
+        ev.reason, ev.ask, ev.tier, ev.name = ["too_short"], False, "无", None
         return ev
     if (ev.s1 >= config.T_AUTO and ev.m >= config.MARGIN
             and ev.rho >= config.RHO_MIN and ev.n_total >= n_min_auto):

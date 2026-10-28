@@ -68,7 +68,7 @@ def test_decide_order():
 
     e = ev(duration=10.0, n_total=200)
     winmatch.decide_from_evidence(e, 600)
-    check("时长不够 → 不出卡", not e.ask and e.name is None and e.reason == ["short"])
+    check("时长不够 → 不出卡", not e.ask and e.name is None and e.reason == ["too_short"])
 
     e = ev()
     winmatch.decide_from_evidence(e, 600)
