@@ -258,6 +258,7 @@ def undo(u: Undo):
 
 class Skip(BaseModel):
     rid: str
+    clusters: int | None = None      # 「人数不对」时指定，仅本次重跑生效
 
 
 @app.post("/api/finalize")
@@ -277,9 +278,12 @@ def retry(s: Skip):
     rec = store.get(s.rid)
     if not rec:
         raise HTTPException(404)
-    store.update(s.rid, status=store.ST_QUEUED, stage="queued", progress=0, error=None)
+    fields = {"status": store.ST_QUEUED, "stage": "queued", "progress": 0, "error": None}
+    if s.clusters:
+        fields["clusters_hint"] = int(s.clusters)
+    store.update(s.rid, **fields)
     worker.kick()
-    return {"ok": True}
+    return {"ok": True, "clusters": s.clusters}
 
 
 @app.post("/api/scan")
@@ -304,6 +308,7 @@ def clip(rid: str, cid: int):
 @app.get("/health")
 def health():
     return {**config.health(), "stats": store.stats(),
+            "clusters_default": config.CLUSTERS_DEFAULT,
             "protos": protolib.status(),
             "recording_dir": config.RECORDING_DIR,
             "last_scan": _state["last_scan"]}

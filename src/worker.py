@@ -38,7 +38,8 @@ def run_one(rid):
         return
     store.update(rid, status=store.ST_PROCESSING, stage="start", progress=1, error=None)
     try:
-        out = pipeline.process(path, rid, progress=_progress_maker(rid))
+        out = pipeline.process(path, rid, clusters=rec.get("clusters_hint"),
+                               progress=_progress_maker(rid))
     except Exception as e:
         attempts = int(rec.get("attempts", 0)) + 1
         store.update(rid, status=store.ST_FAILED, error=f"{type(e).__name__}: {e}",

@@ -57,7 +57,7 @@ PROTOS_DIR = os.path.join(DB_DIR, "protos")
 PROTOS_CURRENT = os.path.join(PROTOS_DIR, "CURRENT")
 EMB_CACHE_DIR = os.path.join(DB_DIR, "emb")       # L1：按来源的窗向量
 VOICES_DIR = os.path.join(DB_DIR, "voices")       # 注册时抽出的簇音频切片
-CLIP_CACHE_DIR = os.path.expanduser("~/Library/Caches/voiceprint")
+CLIP_CACHE_DIR = os.path.expanduser(os.environ.get("VP_CLIP_CACHE", "~/Library/Caches/voiceprint"))
 RECORDING_DIR = os.environ.get(
     "VP_RECORDINGS", os.path.expanduser("~/OneDrive/数据库/录音"))   # 只往里写 .说话人.md
 
@@ -125,6 +125,14 @@ CLUSTER_MERGE_COS = 0.85
 # ── 流水线 ──────────────────────────────────────────────────────────────
 THREADS = 4                # 实测 4 最快，8 慢 20%，10 慢 2.4 倍
 STABLE_SEC = int(os.environ.get("VP_STABLE_SEC", "60"))  # 文件 size+mtime 连续这么多秒不变才认为同步完成
+
+# 默认按 2 个人分离（可用 VP_CLUSTERS 改）。
+# 为什么不让模型自己数：本机实测，一段 5 分钟的双人电话录音，把聚类阈值从 0.5 扫到 0.95，
+# 结果永远是「1 个主簇 + 若干碎片」；改用窗口向量做 k-means + silhouette 选 k，
+# 最优 k=2 但切出来是 281:18 —— 说明在这类窄带录音上，两个人的嵌入向量本身就不分家。
+# 强行「自动」的代价是切出 40 多个碎片簇（真跑过一次），比「默认 2 人」错得厉害。
+# 人多的会（3 人以上）用 --clusters 指定，或确认页上的「人数不对」重跑。
+CLUSTERS_DEFAULT = int(os.environ.get("VP_CLUSTERS", "2"))
 LONG_AUDIO_SEC = 1800      # >30 分钟只打 long_audio_unreliable 标记，MVP 不切段
 VP_SEG_MIN_SEC = 1500      # 标定之后再启用的分流阈值（当前不生效）
 SEG_LEN, SEG_HOP = 360, 300

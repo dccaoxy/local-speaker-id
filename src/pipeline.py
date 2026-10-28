@@ -29,7 +29,7 @@ def log(*a):
 
 
 # ── 分离 ────────────────────────────────────────────────────────────────
-def diarize(audio, sr, clusters=-1):
+def diarize(audio, sr, clusters=2):
     cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
@@ -69,7 +69,9 @@ def merge_clusters(audio, sr, segs, ext, cos=None):
     if len(ids) < 2:
         return segs, 0
     M = np.stack(cents)
-    parent = {c: c for c in ids}
+    # parent 必须覆盖**全部**簇，不能只放有质心的那些：没有可用窗的簇（几声杂音）
+    # 遍历时照样会走到 find()，缺 key 直接 KeyError，整段录音判失败。
+    parent = {c: c for c in by}
 
     def find(x):
         while parent[x] != x:
@@ -102,7 +104,7 @@ def merge_clusters(audio, sr, segs, ext, cos=None):
 
 
 # ── 主流程 ──────────────────────────────────────────────────────────────
-def process(path, rid, *, clusters=-1, progress=None, with_asr=True):
+def process(path, rid, *, clusters=None, progress=None, with_asr=True):
     """返回 rec dict（不含 status）。调用方负责落 state 与出稿。"""
     t0 = time.time()
 
@@ -134,7 +136,8 @@ def process(path, rid, *, clusters=-1, progress=None, with_asr=True):
     dur = len(audio) / sr
 
     step("diarize", 15)
-    segs = diarize(audio, sr, clusters)
+    k = config.CLUSTERS_DEFAULT if clusters in (None, -1, 0) else int(clusters)
+    segs = diarize(audio, sr, k)
     ext = sherpa_onnx.SpeakerEmbeddingExtractor(
         sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=config.EMB_MODEL,
                                                     num_threads=config.THREADS))
@@ -182,6 +185,10 @@ def process(path, rid, *, clusters=-1, progress=None, with_asr=True):
     if n_clusters >= config.COLLAPSE_MIN_CLUSTERS and max_share > config.COLLAPSE_SHARE:
         warnings.append(f"这段录音有 {max_share * dur / 60:.0f} 分钟被归成了同一个人，"
                         "分离可能不完整，下面的判定都别太当真。")
+    elif max_share > 0.90:
+        # 两簇形态里一人占九成以上：多半是根本没分开，而不是对方真的一直没说话。
+        warnings.append(f"这段录音 {max_share:.0%} 的时间被判给同一个人。"
+                        "如果实际有两个人在说，点「人数不对」重跑一次。")
     if overlap > config.OVERLAP_ALERT:
         warnings.append(f"有 {overlap:.0%} 的时长被多个说话人同时覆盖，重叠部分请回听。")
 

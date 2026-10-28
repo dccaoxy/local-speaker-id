@@ -125,6 +125,19 @@ async function renderConfirm() {
   );
 
   const banners = (data.warnings || []).map((w) => el('div', { class: 'banner' }, w));
+  // 「人数不对」出口：模型数不准说话人（实测双人电话录音会被切成 40 多个碎片簇），
+  // 与其假装能自动，不如给一个两秒就能改的入口。
+  const clusterPicker = el('div', { class: 'tiny', style: 'margin:-6px 0 14px' },
+    '分离成了 ', el('b', {}, String((data.clusters || []).length)), ' 个人。',
+    el('select', { id: 'kpick', style: 'margin:0 6px' },
+      ...[1, 2, 3, 4, 5, 6].map((n) => el('option', { value: n, selected: n === data.clusters.length ? 'selected' : null }, String(n)))),
+    el('button', { onclick: async () => {
+      const k = Number(document.getElementById('kpick').value);
+      await api('/api/retry', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ rid: RID, clusters: k }) });
+      location.reload();
+    } }, '重新分离'));
+  banners.push(clusterPicker);
 
   if (!pending.length) {
     app.replaceChildren(head, ...banners,
