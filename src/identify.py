@@ -74,6 +74,24 @@ def embed(extractor, samples):
     return v / n if n > 0 else None
 
 
+_WHY = {
+    "isolation_broken": "分离可能不完整，整段录音的判定都不作数",
+    "mixed": "像几个人在抢话，分段本身就不准",
+    "noisy": "声音太小或太远，没敢认",
+    "mixed_weak": "断断续续，拿不准",
+    "low_margin": "像两个人，分不出",
+    "low_rho": "前后不一致，拿不准",
+    "few_match": "库里没有这个人",
+    "too_short": "这段太短，没认人",
+    "few_evidence": "有效语音太少",
+    None: "自动判定",
+}
+
+
+def _why(reason):
+    return _WHY.get(reason, "自动判定")
+
+
 def _atomic_write(path, text):
     """OneDrive 目录下必须 tmp + rename：同步进程会锁文件，用户也可能正开着看。"""
     import tempfile
@@ -172,14 +190,12 @@ def main():
             sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=EMB_MODEL, num_threads=config.THREADS))
         protos = winmatch.build_protos()
         gate_db = winmatch.gate_db_of(audio_m, 16000)
-        n_rec = sum(max(0, int(e - s)) for s, e in
-                    ((x["start"], x["end"]) for x in segs))
         evs = [winmatch.score_cluster(audio_m, 16000, spans, cluster_id=spk,
                                       dur_total=dur_total, protos=protos,
                                       gate_db=gate_db, ext=ext)
                for spk, spans in sorted(spans_by.items())]
         for ev in evs:
-            ev.share = round(ev.duration / dur_total, 3) if dur_total else 0.0
+            ev.share = round(ev.duration_s / dur_total, 3) if dur_total else 0.0
             if not ev.longest_span or ev.longest_span == (0.0, 0.0):
                 sp = max(spans_by[ev.cluster_id], key=lambda x: x[1] - x[0])
                 ev.longest_span = sp
@@ -192,15 +208,21 @@ def main():
                 ev.reason = ["same_person"]
             elif ev.name:
                 taken.add(ev.name)
+        # 塌陷是录音级失效：单簇占比过高时任何簇卡都不该出，只留黄条预警
+        n_clusters = len(evs)
+        max_share = max((e.duration_s / dur_total for e in evs), default=0.0)
         for ev in evs:
-            winmatch.decide_from_evidence(ev, dur_total, n_rec)
+            winmatch.decide_from_evidence(ev, dur_total, n_clusters, max_share)
             windows[ev.cluster_id] = ev
-        note = (f"{config.SCORER}@{config.WIN}/{config.HOP}｜{len(protos)} 人｜"
-                f"T_AUTO {config.T_AUTO}｜T_ASK {config.T_ASK}｜margin {config.MARGIN}｜"
-                f"ρ≥{config.RHO_MIN}")
+        collapsed = (n_clusters >= config.COLLAPSE_MIN_CLUSTERS
+                     and max_share > config.COLLAPSE_SHARE)
+        note = (f"{config.SCORER}@{config.WIN}/{config.HOP}｜声纹库 {len(protos)} 人｜"
+                f"判定 T_AUTO {config.T_AUTO} / T_ASK {config.T_ASK}")
     else:
         evs = []
         note = "手动点名"
+        collapsed = False
+        max_share = 0.0
 
     order = {spk: chr(ord("A") + i) for i, spk in
              enumerate(sorted(spans_by, key=lambda k: -sum(e - s for s, e in spans_by[k])))}
@@ -211,22 +233,26 @@ def main():
              f"> 音频 {_human(dur_total)} · {len(spans_by)} 个说话人",
              f"> {note}",
              "> 「未知」表示相似度不足或与次优候选差距太小，需人工确认。"]
+    if collapsed:
+        # 带具体数字：预警要可核实，否则用户只会当成噪音
+        lines.append(f"> ⚠ 这段录音有 {max_share * dur_total / 60:.0f} 分钟被归成了同一个人，"
+                     "分离可能不完整。")
     if overlap > config.OVERLAP_ALERT:
         lines.append(f"> ⚠ 有 {overlap:.0%} 的时长被多个说话人同时覆盖，"
                      "分离可能不完整，重叠部分请回听。")
     lines += ["", "## 聚簇判定", "",
-              "| 聚簇 | 判定 | 最高相似度 | 次优 | ρ | 发言时长 | 占比 |", "|---|---|---|---|---|---|---|"]
+              "| 聚簇 | 判定 | 说明 | 说话时长 | 占比 |", "|---|---|---|---|---|"]
     if manual:
         for spk in sorted(spans_by, key=lambda k: -sum(e - s for s, e in spans_by[k])):
             secs = sum(e - s for s, e in spans_by[spk])
-            lines.append(f"| {spk} | {labels.get(spk, UNKNOWN)} | 手动 | - | - | "
-                         f"{secs:.0f}s | {secs / dur_total:.0%} |")
+            lines.append(f"| {spk} | {labels.get(spk, UNKNOWN)} | 手动指定 | "
+                         f"{_human(secs)} | {secs / dur_total:.0%} |")
     else:
-        for ev in sorted(evs, key=lambda e: -e.duration):
+        for ev in sorted(evs, key=lambda e: -e.duration_s):
             tag = labels.get(ev.cluster_id, UNKNOWN)
             star = "" if ev.name else " *"
-            lines.append(f"| {ev.cluster_id} | {tag}{star} | {ev.top1 or '-'}={ev.s1:.2f} | "
-                         f"{ev.s2:.2f} | {ev.rho:.2f} | {ev.duration:.0f}s | {ev.share:.0%} |")
+            lines.append(f"| {ev.cluster_id} | {tag}{star} | {_why(ev.reason)} | "
+                         f"{_human(ev.duration_s)} | {ev.share:.0%} |")
     if not manual:
         lines += ["", "带 * 的是没经过核对的判定，或需要人工确认的簇。"]
 

@@ -88,7 +88,7 @@ def windows_of(audio, sr, spans, cap=None, gate_db=None):
       2) cap 从「取时间序前缀」改为 stride。前缀截断会让 100 分钟的长簇只
          覆盖前 20 分钟，ρ 与 median 都失效，"前段 A 后段混 B"会被算成很纯。
     """
-    cap = config.WIN_CAP if cap is None else cap
+    cap = config.CAP if cap is None else cap
     chunks = []
     for st, en in spans:
         t = st
@@ -156,13 +156,17 @@ def build_protos(force=False):
 
 @dataclass
 class ClusterEvidence:
-    """一个簇的全部打分证据。判定逻辑只吃这个结构，不散到 UI 层。
+    """一个簇的全部打分证据。判定只吃这个结构，逻辑不外溢到 UI。
 
-    「窗数」三义见 config.py：n_theory 仅自检，n_total 是 ρ 的唯一分母，
-    n_valid 只写台账。用 n_valid 当分母会让「谁都不像」的簇反而得到高 ρ。
+    时长有两个，别混（产品口径-终版 §3）：
+      duration_s 含停顿，只用于卡片统计行「说得最多 · 18 分 20 秒」
+      eff_sec    有效语音 = n_total × HOP，门槛判定只看它
+    一个时长 200 秒的簇，有效语音可能只有 35 秒。混用会渲染出
+    「说了 18 分钟，判成太短」这种判定 bug。
     """
     cluster_id: int
-    duration: float
+    duration_s: float = 0.0
+    eff_sec: float = 0.0
     share: float = 0.0
     longest_span: tuple = (0.0, 0.0)
     n_theory: int = 0
@@ -177,23 +181,32 @@ class ClusterEvidence:
     top1: str | None = None
     second_name: str | None = None
     tier: str | None = None          # 很像 / 有点像 / 无
-    reason: list = field(default_factory=list)   # 见 decide_from_evidence
-    name: str | None = None          # 最终落的名字；None = 未定
-    ask: bool = False                # 是否出卡（用户要不要看这一张）
+    reason: str | None = None        # 单值枚举，见 REASONS
+    name: str | None = None
+    ask: bool = False
+    is_self_match: bool = False      # 注册音频自身当查询，台账里必须能剔除
+
+
+# 七支固定枚举，按优先级排列。前端按枚举查表出文案，不许自由文本。
+REASONS = ("isolation_broken", "mixed", "noisy", "mixed_weak",
+           "low_margin", "low_rho", "few_match", "too_short", "few_evidence")
+# 文案说「没有可靠的人」时 top1 必须为 null
+_NO_RELIABLE = {"mixed", "noisy", "mixed_weak", "few_match", "isolation_broken",
+                "few_evidence"}
 
 
 def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
                   protos=None, gate_db=None, ext=None):
-    """一个簇 → ClusterEvidence。ρ/ρ2 在同一个循环里算，矩阵已在手上，零额外推理。"""
+    """一个簇 → ClusterEvidence。ρ/ρ2 在同一个循环里算，零额外推理。"""
     gate_db = gate_db_of(audio, sr) if gate_db is None else gate_db
     wins = windows_of(audio, sr, spans, gate_db=gate_db)
-    seconds = sum(max(0.0, en - st) for st, en in spans)
-    ev = ClusterEvidence(
-        cluster_id=cluster_id, duration=round(seconds, 1),
-        n_theory=max(0, int(math.floor(seconds)) - 1), n_total=len(wins))
+    dur = sum(max(0.0, en - st) for st, en in spans)
+    ev = ClusterEvidence(cluster_id=cluster_id, duration_s=round(dur, 1),
+                         n_total=len(wins), n_theory=max(0, int(math.floor(dur)) - 1))
+    ev.eff_sec = round(ev.n_total * HOP, 1)
 
     if not wins:
-        ev.reason = ["few_evidence"]
+        ev.reason = "few_evidence"
         return ev
 
     if ext is None:
@@ -201,7 +214,7 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
             sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=EMB, num_threads=config.THREADS))
     q = _vecs(ext, wins)
     if len(q) == 0:
-        ev.reason = ["few_evidence"]
+        ev.reason = "few_evidence"
         return ev
 
     protos = build_protos() if protos is None else protos
@@ -217,11 +230,13 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
             ev.second_name = names[int(order[1])]
             ev.s2 = round(float(med[order[1]]), 3)
         ev.m = round(ev.s1 - ev.s2, 3)
+        # 查询簇就是注册来源本身时 sim≡1.0，这种记录不能进阈值标定
+        ev.is_self_match = ev.s1 >= 0.999
 
         best = B.max(axis=0)
-        ev.n_valid = int((best >= config.RHO_WIN_GATE).sum())
-        ident = B.argmax(axis=0)
         passed = best >= config.RHO_WIN_GATE
+        ev.n_valid = int(passed.sum())
+        ident = B.argmax(axis=0)
         top1_idx = int(order[0])
         ev.rho = round(float(((ident == top1_idx) & passed).sum()) / len(q), 3)
         others = [(int(((ident == i) & passed).sum()), names[i])
@@ -230,77 +245,86 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
             cnt, nm = max(others)
             ev.rho2 = round(cnt / len(q), 3)
             if cnt:
-                ev.second_name = nm if ev.rho2 > 0 else ev.second_name
-    ev.win_pass_rate = round(ev.n_total / ev.n_theory, 3) if ev.n_theory else 0.0
+                ev.second_name = nm
+
+    # 分母必须与 windows_of 共用同一个 CAP：否则 30~100 分钟的簇会被截断稀释，
+    # 长簇被系统性推进 noisy 分支，界面写「声音太小」而实际他说了一小时。
+    denom = min(ev.n_theory, config.CAP)
+    ev.win_pass_rate = round(ev.n_total / denom, 3) if denom > 0 else 0.0
     decide_from_evidence(ev, dur_total)
     return ev
 
 
-def decide_from_evidence(ev, dur_total=None, n_recording=None):
-    """严格按序判定，顺序不可调换（改顺序等于改产品定义）。
+def decide_from_evidence(ev, dur_total=None, n_clusters=None, max_share=None):
+    """严格按 产品口径-终版 §1 的七步序列，命中即返回，不许并行判断。
 
-    1. 窗数低于硬底线            → few_evidence，不出卡（bug 检测，不是业务门槛）
-    2. 发言时长不够              → 静默标「说话人N」，不出卡
-    3. 四项全过                  → 静默落名
-    4. 过出卡线                  → 出卡，reason 说明为什么要问
-    5. 其余                      → 未知，不出卡
+    并行判断会让同一段录音跑两次显示不同理由——这是最容易被用户抓到的
+    「这工具不靠谱」的证据。
     """
-    d = ev.duration if dur_total is None else dur_total
-    # n_recording 必须是**整场**录音的窗数，不能拿本簇的 n_total 顶替——
-    # 那样下限恒为 0.6*n，永远判通过，等于没有这个门槛。
-    n_min_auto = (config.n_min_auto_dyn(n_recording)
-                  if n_recording else config.N_MIN_AUTO)
+    d = dur_total if dur_total is not None else max(ev.duration_s, 1.0)
 
+    # 1. 窗数不够，纯噪声 —— 这是 bug 信号，不是业务判断，不出卡也不给用户文案
     if ev.n_total < config.N_MIN_ASK:
-        ev.reason, ev.ask, ev.tier, ev.name = ["few_evidence"], False, "无", None
+        ev.reason, ev.ask, ev.tier, ev.name = "few_evidence", False, None, None
         return ev
-    if ev.duration < config.sec_threshold(d):
-        ev.reason, ev.ask, ev.tier, ev.name = ["too_short"], False, "无", None
+
+    # 2. 塌陷：整段录音的分离失效，任何簇卡都不该出（挂录音级黄条）
+    if (n_clusters is not None and n_clusters >= config.COLLAPSE_MIN_CLUSTERS
+            and max_share is not None and max_share > config.COLLAPSE_SHARE):
+        ev.reason, ev.ask, ev.tier, ev.name = "isolation_broken", False, None, None
         return ev
+
+    gated = ev.eff_sec >= config.card_gate(d)
+
+    # 3. 四项全过 → 静默落名（稿子里用斜体，这是用户唯一能看出「机器认的」的信号）
     if (ev.s1 >= config.T_AUTO and ev.m >= config.MARGIN
-            and ev.rho >= config.RHO_MIN and ev.n_total >= n_min_auto):
-        ev.name, ev.ask, ev.tier, ev.reason = ev.top1, False, "很像", []
+            and ev.rho >= config.RHO_MIN and ev.n_total >= config.N_MIN_AUTO):
+        ev.name, ev.ask, ev.tier, ev.reason = ev.top1, False, "很像", None
         return ev
-    if ev.s1 >= config.T_ASK:
-        ev.ask, ev.tier, ev.name = True, ("有点像" if ev.s1 < config.T_AUTO else "很像"), None
-        if ev.m < config.MARGIN:
-            ev.reason = ["low_margin"]
-        elif ev.rho < config.RHO_MIN:
-            # 簇内混人的两种成因，动作相同（都要用户听），只是文案不同
-            ev.reason = ["mixed" if ev.rho2 >= 0.25
-                         else ("mixed_weak" if ev.rho2 >= 0.10 else "noisy")]
-        elif ev.n_total < n_min_auto:
-            ev.reason = ["few_windows"]
+
+    # 4. 过 T_ASK 且够长 → 疑似卡。reason 按优先级短路
+    if ev.s1 >= config.T_ASK and gated:
+        ev.ask, ev.tier, ev.name = True, ("很像" if ev.s1 >= config.T_AUTO else "有点像"), None
+        if ev.rho < config.RHO_MIN:
+            ev.reason = ("mixed" if ev.rho2 >= 0.25
+                         else ("noisy" if ev.rho2 < 0.10 else "mixed_weak"))
+        elif ev.m < config.MARGIN:
+            ev.reason = "low_margin"
         else:
-            ev.reason = ["low_rho"]
+            ev.reason = "low_rho"
         return ev
-    if config.CARD_STRANGER:
-        ev.ask, ev.tier, ev.name, ev.reason = True, "无", None, ["unknown_person"]
+
+    # 5. 信号太糊：真录糊了，后面所有档都不该出卡
+    if ev.win_pass_rate < config.WIN_PASS_MIN:
+        ev.reason, ev.ask, ev.tier, ev.name = "noisy", False, "无", None
         return ev
-    ev.ask, ev.tier, ev.name, ev.reason = False, "无", None, ["unknown_person"]
+
+    # 6. 分低但信号干净 → 新人卡
+    if gated and ev.duration_s >= config.NEW_MIN_SEC:
+        ev.reason, ev.ask, ev.tier, ev.name = "few_match", True, "无", None
+        return ev
+
+    # 7. 其余：静默标「说话人N」，可核实的短簇标 too_short
+    ev.reason = "too_short" if not gated else None
+    ev.ask, ev.tier, ev.name = False, "无", None
     return ev
 
 
 def to_api(ev):
-    """序列化给前端。数字白名单在这里兜，不指望 UI 自觉。
+    """序列化给前端。**全禁数字**（含调试灰字）——接口层返 null，不靠前端自律。
 
-    只有「像两个人」和「分数不够」两支允许出现数字；few_windows / low_rho /
-    noisy / unknown_person 一律 null——0.50 印在卡上，用户会立刻拿去对照
-    「0.44 才敢认」，之后所有数字都不可信。
+    唯一的例外是 duration_s 用于卡片统计行；eff_sec / N_total / s1 / ρ 都不出这个门。
     """
-    expose = ("low_margin" in (ev.reason or [])) or ev.tier in ("有点像", "无")
     return {
         "cluster_id": ev.cluster_id,
-        "duration_s": ev.duration,
+        "duration_s": ev.duration_s,
         "share": ev.share,
         "state": "pending",
         "tier": ev.tier,
-        "reason": ev.reason or [],
+        "reason": ev.reason,
+        "top1": None if ev.reason in _NO_RELIABLE else ev.top1,
         "longest_span": list(ev.longest_span),
-        "top1": ev.top1 if expose or not ev.reason else None,
-        "sim": round(ev.s1, 2) if expose else None,
-        "second": round(ev.s2, 2) if expose else None,
-        "second_name": ev.second_name if expose else None,
+        "is_self_match": ev.is_self_match,
     }
 
 

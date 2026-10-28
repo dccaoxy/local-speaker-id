@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """唯一配置源。其他模块一律 `import config`，禁止再写任何字面量阈值。
 
-## 为什么必须集中
-判定阈值曾经散落在三处且互相矛盾：identify.py 的 0.70、winmatch.py 的 0.40、
-产物里的 0.45。其中 0.70 属于**质心模式**（整段取均值）的量纲，与滑窗模式不可互换
-（实测同人都是 0.487，异人一个是 0.468、一个是 0.376）。该模式已整段删除，
-现在只剩一套滑窗刻度。
+口径来源：`docs/产品口径-终版.md`（封版）。与本文件冲突的旧文档、旧消息、
+旧产物头信息一律以该文件为准。改任何数值都会改变历史 decisions 的可比性。
 
-## 「窗数」三义，代码里不要混用
-  N_theory = floor(seconds) - 1        # 理论值，仅展示与自检
-  N_total  = windows_of() 的返回长度    # 能量过滤 + 均匀步进后；**ρ 的唯一分母**
-  N_valid  = best_sim >= T_ASK 的窗数   # 只写台账做诊断，禁止参与判定
-用 N_valid 当 ρ 的分母会让「一堆窗谁都不像」的簇反而得到高 ρ，正好和要抓的混合物相反。
+## 字段命名（不许自创第四个）
+  N_theory   = floor(seconds) − 1      理论窗数，只做展示与自检
+  N_total    = windows_of 返回长度      能量过滤 + cap 之后；ρ 的唯一分母
+  N_valid    = best_sim ≥ T_ASK 的窗数  只进台账做诊断，不参与任何判定
+  eff_sec    = N_total × HOP            HOP=1.0s，故 30/60 窗 ≡ 30/60 秒有效语音
+  duration_s = 簇内各段时长之和          含停顿，只用于展示「说得最多 · 18 分 20 秒」
+判定只用 N_total。eff_sec ≠ duration_s：时长 200 秒的簇，有效语音可能只有 35 秒。
 
-## is_overlap 与 rho2 分工（别混用）
-  is_overlap：录音级。segs 里同一时间段被 ≥2 个簇覆盖的时长占比 > 15%。
-              只驱动 md 头部一行「分离可能不完整」预警。
-  rho2      ：簇级。指向「除 top1 外第二频繁身份」的窗占比。
-              只驱动卡片文案（mixed / mixed_weak / noisy）。
+## ⚠ 必读警示（来自产品口径-终版 §2，原样保留）
+即使 80 个窗，±2SE≈0.039 也大于 T_AUTO 与最近正例（0.456）之间的间隙 0.016。
+**统计上没有任何簇「够格」静默署名。** 静默档的本质是「用 T_AUTO 把可疑的推给人，
+接受残余错误率」，不是「窗够了就保正确」。N_MIN_AUTO 只用于挡住纯噪声。
+
+⚠ win_pass_rate = N_total / min(N_theory, CAP)。分母必须封顶，否则 30~100 分钟的簇
+会被 cap 截断污染，判据在该区间失效。簇长 > CAP 时 win_pass_rate ≡ 1.0，无诊断意义。
+
+⚠ win_pass_rate 测不到**分离塌陷**（塌陷时窗能量全够，它接近常态 0.74）。
+塌陷只能靠 max_cluster_share 判。
 """
 import os
 
@@ -26,8 +30,7 @@ MODEL_DIR = os.environ.get("VP_MODEL_DIR", os.path.expanduser("~/.voiceprint/mod
 SEG_MODEL = os.path.join(MODEL_DIR, "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx")
 EMB_MODEL = os.path.join(MODEL_DIR, "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
 
-# 合规红线：声纹向量只写本地，任何路径都不许指向 ~/OneDrive/。
-# 生物识别信息躺在同步盘上是合规问题，不是工程问题。
+# 合规红线：声纹向量、原型、decisions、state 只许落本地，绝不进 OneDrive。
 VP_ROOT = os.path.expanduser("~/.voiceprint")
 DB_DIR = os.environ.get("VP_DB", os.path.join(VP_ROOT, "db"))
 WORK_DIR = os.environ.get("VP_WORK", os.path.join(VP_ROOT, "work"))
@@ -36,10 +39,10 @@ DECISIONS = os.path.join(VP_ROOT, "decisions.jsonl")
 SPEAKERS = os.environ.get("VP_SPEAKERS", os.path.join(VP_ROOT, "speakers.json"))
 PROTOS_DIR = os.path.join(DB_DIR, "protos")
 PROTOS_CURRENT = os.path.join(PROTOS_DIR, "CURRENT")
-EMB_CACHE_DIR = os.path.join(DB_DIR, "emb")        # L1：按来源的窗向量
-VOICES_DIR = os.path.join(DB_DIR, "voices")        # 注册时抽出的簇音频，切断对 OneDrive 原文件名的依赖
-CLIP_CACHE_DIR = os.path.expanduser("~/Library/Caches/voiceprint")   # 15 秒试听样本
-RECORDING_DIR = os.path.expanduser("~/OneDrive/数据库/录音")          # 只读，永不写入
+EMB_CACHE_DIR = os.path.join(DB_DIR, "emb")       # L1：按来源的窗向量
+VOICES_DIR = os.path.join(DB_DIR, "voices")       # 注册时抽出的簇音频切片
+CLIP_CACHE_DIR = os.path.expanduser("~/Library/Caches/voiceprint")
+RECORDING_DIR = os.path.expanduser("~/OneDrive/数据库/录音")   # 只读，永不写入
 
 
 def assert_not_onedrive(path):
@@ -50,72 +53,65 @@ def assert_not_onedrive(path):
     return p
 
 
-# ── 声纹比对（只有一套刻度）─────────────────────────────────────────────
-SCORER = "window"
+# ── 判定常数（产品口径-终版 §2，唯一来源）───────────────────────────────
+SCORER = "window"          # 质心模式已整段删除，没有第二套刻度
 WIN, HOP = 2.0, 1.0
-MIN_DUR = 1.5              # 短于此的片段不提取声纹
+MIN_DUR = 1.5
 
-T_AUTO = 0.44              # 静默落名
-T_ASK = 0.36               # 出卡下限
-MARGIN = 0.05
-RHO_MIN = 0.70             # 与 RHO_WIN_GATE 成对改，单改任一个是 bug
-RHO_WIN_GATE = 0.36        # 统计 ρ/ρ2 时认定"这一窗算数"的门槛；与 T_ASK 同值
-N_MIN_ASK = 20             # 硬底线，低于此不出卡 → reason=few_evidence（bug 检测，不是业务门槛）
-N_MIN_AUTO = 60            # 静默所需窗数。相邻窗重叠 50%，n_eff≈0.4~0.7n
+T_AUTO = 0.44              # 静默落名门槛
+T_ASK = 0.36               # 提问下沿
+MARGIN = 0.05              # 次优差；库 <5 人时恒真，仅作保险
+RHO_MIN = 0.70             # 一致窗比例；只降级不升级
+RHO_WIN_GATE = 0.36        # 统计 ρ/ρ2 时认定「这窗算数」的门槛；与 RHO_MIN 成对改
+N_MIN_ASK = 30             # 出卡下限（窗）＝ 30 秒有效语音
+N_MIN_AUTO = 60            # 静默下限（窗）＝ 60 秒有效语音；只防纯噪声，不保证正确性
+WIN_PASS_MIN = 0.40        # 新人卡信号质量下限
+CAP = 1200                 # windows_of 的截断上限；win_pass_rate 的分母也必须用它封顶
+NEW_PER_REC_MAX = 3        # 新人卡张数上限（超出折叠，仍可展开认领，不丢弃）
+NEW_MIN_SEC = 60           # 新人簇最短时长
 
-# 「时长」是唯一的业务门槛，nwin 只是硬底线与诊断。两个门槛并存会让 60 秒边界上的簇随机落档。
-SEC_RULE_FACTOR = 0.3
-SEC_RULE_CAP = 60
+SEC_RULE_FACTOR = 0.3      # 出卡门槛 = min(SEC_RULE_CAP, 录音总长 × 本值)
+SEC_RULE_CAP = 60          # 只对出卡生效，不约束静默
 
-# 能量门限：绝对下限 + 相对整段动态范围。全录音中位数在 score 阶段算一次，
-# 不在簇内算——簇内分位会恒定削掉每人固定比例的窗，让 N 只是时长的函数。
-MIN_RMS_ABS_DBFS = -50
-RELEASE_MEDIAN_DB = 20
+MIN_RMS_ABS_DBFS = -50     # 能量门限的绝对下限
+RELEASE_MEDIAN_DB = 20     # 相对整段电平中位数的动态范围
 
-# 切窗上限。**必须均匀步进，不能取前缀**：100 分钟的簇约 4800 窗，
-# 前缀截断会让 ρ 和 median 只反映前 20 分钟，"前段 A 后段混 B"会被算成很纯。
-WIN_CAP = 1200
+# 塌陷：整段录音层面的失效，与 win_pass_rate 无关（后者测不到它）
+COLLAPSE_SHARE = 0.70
+COLLAPSE_MIN_CLUSTERS = 3
+OVERLAP_ALERT = 0.15       # 同时间段多簇覆盖占比超过此值 → is_overlap（录音级预警）
 
 # ── 流水线 ──────────────────────────────────────────────────────────────
 THREADS = 4                # 实测 4 最快，8 慢 20%，10 慢 2.4 倍
 STABLE_SEC = 60            # 文件 size+mtime 连续这么多秒不变才认为同步完成
-SEG_MIN_SEC = 1500         # 短于 25 分钟且簇数少时单段直跑（分段会拖慢）
-SEG_MAX_CLUSTERS = 5       # 簇数 ≥5 也走分段：人多时相似度矩阵更病态，短录音同样会塌
-SEG_LEN = 360              # 每段 6 分钟
-SEG_HOP = 300              # 步长 5 分钟，1 分钟重叠用于边界去重
-OVERLAP_ALERT = 0.15       # 同时间段多簇覆盖占比超过此值 → is_overlap
-
-# 陌生人是否出卡。ux 指出「库里没有这个人」的模板建在出卡上，若 s1<T_ASK 一律不出卡，
-# 那个模板永远不会显示、新人也永远没有认领入口。终版判定顺序是「不出卡」，
-# 故此处留 False 待 team-lead 拍板；改 True 即放行（不改任何其他逻辑）。
-CARD_STRANGER = False
+LONG_AUDIO_SEC = 1800      # >30 分钟只打 long_audio_unreliable 标记，MVP 不切段
+VP_SEG_MIN_SEC = 1500      # 标定之后再启用的分流阈值（当前不生效）
+SEG_LEN, SEG_HOP = 360, 300
 
 # ── 待确认稿 ────────────────────────────────────────────────────────────
-UNKNOWN = "未知"            # 未处置簇渲染为 未知A / 未知B（按发言时长降序）
-CLIP_SEC = 5.0             # 每段取 5 秒
-CLIP_N = 3                 # 能量最高的 3 段拼成 15 秒
-CLIP_GAP = 0.25            # 段间静音
-SAMPLE_K = 3               # 每簇抽 3 句转写样例
-SAMPLE_MAX_CHARS = 30
+UNKNOWN = "未知"
+CLIP_SEC, CLIP_N, CLIP_GAP = 5.0, 3, 0.25
+SAMPLE_K, SAMPLE_MAX_CHARS = 3, 30
 
 
-def sec_threshold(dur_total):
-    """业务门槛：簇发言时长至少要这么长才值得问人 / 才够静默落名。"""
+def card_gate(dur_total):
+    """出卡门槛：时长下限 = min(60, 录音总长 × 0.3)。只对出卡生效，不约束静默。"""
     return min(SEC_RULE_CAP, dur_total * SEC_RULE_FACTOR)
 
 
-def n_min_auto_dyn(n_recording):
-    """短录音放宽：整场窗数少时不应该因为绝对窗数不够而永远落不了名。"""
-    return min(N_MIN_AUTO, max(30, int(0.6 * n_recording)))
+def health():
+    """/health 与前端文案的唯一数值来源。JS 里不许写死 0.44/30 这类数。"""
+    return {
+        "scorer": f"{SCORER}@{WIN}/{HOP}",
+        "T_AUTO": T_AUTO, "T_ASK": T_ASK, "MARGIN": MARGIN,
+        "RHO_MIN": RHO_MIN, "RHO_WIN_GATE": RHO_WIN_GATE,
+        "ask_min_seconds": float(N_MIN_ASK), "auto_min_windows": float(N_MIN_AUTO),
+        "win_pass_min": WIN_PASS_MIN, "cap": CAP,
+        "new_per_rec_max": NEW_PER_REC_MAX, "new_min_sec": NEW_MIN_SEC,
+        "db": DB_DIR,
+    }
 
 
 def env_overrides():
-    """给 /health 与报告头用。前端文案里的 0.44 必须从这里读，别写死在 JS 里。"""
-    return {
-        "scorer": f"{SCORER}@{WIN}/{HOP}",
-        "threshold": T_AUTO, "ask": T_ASK, "margin": MARGIN,
-        "rho_min": RHO_MIN, "rho_win_gate": RHO_WIN_GATE,
-        "n_min_ask": N_MIN_ASK, "n_min_auto": N_MIN_AUTO,
-        "sec_rule": [SEC_RULE_FACTOR, SEC_RULE_CAP],
-        "db": DB_DIR,
-    }
+    """旧名保留，等同 health()。"""
+    return health()
