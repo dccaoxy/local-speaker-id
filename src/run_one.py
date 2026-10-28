@@ -28,6 +28,20 @@ def _progress(rid):
     return cb
 
 
+def _cleanup(rid):
+    """定稿后清掉可再生的中转音频，只留 a16.wav（用户点「新人入库」时还要用）。
+
+    a.wav / bl8.wav / bl16.wav 加起来通常是原音频的 4~5 倍体积，
+    两段 25 分钟的录音就能吃掉 300MB。不留它们不影响任何功能。
+    """
+    d = os.path.join(config.WORK_DIR, rid)
+    for name in ("a.wav", "bl8.wav", "bl16.wav"):
+        try:
+            os.remove(os.path.join(d, name))
+        except OSError:
+            pass
+
+
 def main(rid):
     rec = store.get(rid)
     if not rec:
@@ -72,6 +86,7 @@ def main(rid):
                     f"{rec2.get('title', '')} · 最像 {names}")
     else:
         store.update(rid, status=store.ST_FINAL)
+        _cleanup(rid)
 
     print(json.dumps({"rid": rid, "elapsed": round(time.time() - t0, 1),
                       "clusters": len(out["clusters"]),
