@@ -190,6 +190,7 @@ class ClusterEvidence:
     silent_ok: bool = True       # 是否获准静默（protolib.eligible(for_silent=True)）
     is_self_match: bool = False      # 注册音频自身当查询，台账里必须能剔除
     can_one_click: bool = False      # 界面能不能给「是 X」一键按钮（原型质量门控）
+    self_excluded: list = field(default_factory=list)  # 因「样本来自本录音」被排除的人
 
 
 # 十支固定枚举，按优先级排列。前端按枚举查表出文案，不许自由文本。
@@ -226,6 +227,7 @@ def _usable_matrices(protos, prov, recording, man):
     「自己给自己作证」只能靠剔除同源窗来切断，调阈值救不了。
     """
     mats, meta = {}, {}
+    excluded = []
     for name, p in protos.items():
         if not len(p):
             continue
@@ -233,7 +235,8 @@ def _usable_matrices(protos, prov, recording, man):
         if m is not None and recording:
             keep = np.array([str(x) != str(recording) for x in m])
             if not keep.any():
-                continue          # 这个人的样本全部来自本录音 → 对这段不参与打分
+                excluded.append(name)   # 样本全部来自本录音 → 对这段不参与打分
+                continue
             mats[name] = p[keep]
         else:
             mats[name] = p
@@ -243,7 +246,7 @@ def _usable_matrices(protos, prov, recording, man):
             "source_n": int(pm.get("n_sources", 0)),
             "verified": bool(pm.get("verified", False)),
         }
-    return mats, meta
+    return mats, meta, excluded
 
 
 def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
@@ -283,7 +286,8 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
     if protos is None:
         protos = build_protos()
 
-    mats, meta = _usable_matrices(protos, prov, recording, man)
+    mats, meta, excluded = _usable_matrices(protos, prov, recording, man)
+    ev.self_excluded = excluded
     names = list(mats)
     if not names:
         # 库里没人（或全被同源剔除）：这时「获准静默」必须是 False。
@@ -452,6 +456,8 @@ def to_api(ev):
         "few_seconds": int(ev.eff_sec) if ev.reason == "few_windows" else None,
         "longest_span": list(ev.longest_span),
         "is_self_match": ev.is_self_match,
+        # 这个人只在这段录音里注册过，所以这里认不出他——不是库里没有他
+        "self_excluded": ev.self_excluded,
     }
 
 

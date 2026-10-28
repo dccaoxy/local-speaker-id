@@ -194,6 +194,11 @@ function cardFor(c, data) {
     el('div', { class: 'tiny' }, c.clip_url ? '跨 3 段拼接，按空格键也能播' : '这段太短，听不出是谁'),
     (c.samples || []).length ? samples : null,
     el('div', { class: 'why', html: why(c).replace(/&/g, '&amp;') }),
+    (c.self_excluded || []).length
+      ? el('div', { class: 'tiny' },
+          `库里的 ${c.self_excluded.join('、')} 只有这段录音的样本，所以在这里认不出——` +
+          '否则他会用自己给自己作证。确认一次之后，下次就能认了。')
+      : null,
   );
 
   node.appendChild(actionsFor(c, data));

@@ -36,15 +36,24 @@ _state = {"watcher": None, "last_scan": 0.0}
 
 
 def _watcher_loop():
+    fails, last_msg, interval = 0, "", 5.0
     while True:
         try:
             new = watch.scan()
             for rid in new:
                 worker.kick()
             _state["last_scan"] = time.time()
+            fails, interval, last_msg = 0, 5.0, ""
         except Exception as e:
-            print("[watch]", e, flush=True)
-        time.sleep(5)
+            fails += 1
+            msg = f"{type(e).__name__}: {e}"
+            # 同一个错误只打一次，并且指数退避：环境坏掉时不能每 5 秒刷一条日志、
+            # 也不能每 5 秒重试一次（那正是上回堆出 3 万个 tmp 的原因）。
+            if msg != last_msg:
+                print(f"[watch] 第 {fails} 次失败 {msg}", flush=True)
+                last_msg = msg
+            interval = min(60.0, 5.0 * (2 ** min(fails, 4)))
+        time.sleep(interval)
 
 
 @asynccontextmanager
@@ -121,6 +130,7 @@ def get_recording(rid: str):
         raise HTTPException(404)
     names = store.known_names()
     verdicts = store.verdicts(rid)
+    pipeline._fill_self_excluded(rec)
     cards = []
     for c in rec.get("clusters", []):
         c = dict(c)

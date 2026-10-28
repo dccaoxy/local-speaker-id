@@ -236,8 +236,23 @@ def process(path, rid, *, clusters=None, progress=None, with_asr=True):
     return rec
 
 
+def _fill_self_excluded(rec):
+    """给缺这个字段的簇补上「本段录音里认不出谁」。只在渲染时算，不重跑打分。"""
+    try:
+        import protolib
+        names = protolib.people_from_recording(rec["rid"])
+    except Exception:
+        names = []
+    if not names:
+        return
+    for c in rec.get("clusters", []):
+        if not c.get("self_excluded") and c.get("reason") == "few_match":
+            c["self_excluded"] = names
+
+
 def render_rec(rec):
     """按当前台账重渲染 md（改名 / 撤销后调用，不重跑分离）。"""
+    _fill_self_excluded(rec)
     verdicts = store.verdicts(rec["rid"])
     asr_rows = []
     try:

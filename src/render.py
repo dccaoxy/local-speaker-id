@@ -91,9 +91,12 @@ def render(rec: dict, verdicts: dict, asr_rows=None, samples=None, warnings=None
               "| 聚簇 | 判定 | 说明 | 说话时长 | 占比 |", "|---|---|---|---|---|"]
     for c in clusters:
         cid = c["cluster_id"]
+        why = _WHY.get(c.get("reason"), "自动判定")
+        if c.get("self_excluded") and c.get("reason") == "few_match":
+            # 「库里明明有他」这种情况必须解释，否则看起来像系统把人忘了
+            why = f"这个人的样本来自本录音，按规则不参与本段判定（避免自己给自己作证）"
         lines.append(f"| {cid} | {_fmt(labels.get(cid), kinds.get(cid))} | "
-                     f"{_WHY.get(c.get('reason'), '自动判定')} | "
-                     f"{human(c.get('duration_s', 0))} | {c.get('share', 0):.0%} |")
+                     f"{why} | {human(c.get('duration_s', 0))} | {c.get('share', 0):.0%} |")
 
     if samples:
         lines += ["", "## 认人参考（每簇抽样，按字数取长句）", ""]
@@ -143,5 +146,15 @@ def write_md(path: str, text: str):
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # 同步盘（OneDrive/Dropbox）有时会拒绝 rename 覆盖。宁可写出一份
+        # 「可能被截断」的稿子，也不能让用户拿不到结果——稿子随时能重渲染。
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
     return path

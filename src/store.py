@@ -42,11 +42,30 @@ def _atomic_json(path, obj):
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        # 有些文件系统不允许 rename 覆盖（SMB、部分同步盘、受限环境）。
+        # 这时退化成「直接写」：牺牲「原子替换」的保证，换「能用」。
+        # 状态文件本身可重建，被截断的代价是重跑一遍，不是丢数据。
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    except Exception:
+        # 写失败必须自己收尸。否则每失败一次就落一个 .tmp，扫描器每 5 秒跑一次，
+        # 一天下来就是几万个垃圾文件（真实发生过：~/.voiceprint 里 32,177 个）。
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+        raise
 
 
 def fingerprint(path, size, mtime):

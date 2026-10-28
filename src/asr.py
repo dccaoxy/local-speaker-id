@@ -90,13 +90,47 @@ def samples_for(spans, rows, k=None, max_chars=None):
     return out
 
 
+def assign_rows(segs, rows):
+    """把每句转写文本归给**唯一**一个簇：覆盖该句时长最多的那个。
+
+    早期版本按「起点落在任一簇区间内」判，于是重叠段里同一句会同时进两个簇的
+    例句列表——两条卡片的例句一模一样，用户一眼就看出这是糊的。
+    """
+    # 会议 App 导出的格式只有起始时间（end=None）。归属必须用「时长」，
+    # 所以先补一个估计值：到下一句开始为止（最多 15 秒）。
+    rows = list(rows or [])
+    norm = []
+    for i, (st, en, txt) in enumerate(rows):
+        if en is None:
+            nxt = rows[i + 1][0] if i + 1 < len(rows) else st + 3.0
+            en = min(max(nxt, st + 0.5), st + 15.0)
+        norm.append((st, en, txt))
+    out = {}
+    for st, en, txt in norm:
+        best, best_cov = None, 0.0
+        for s in segs or []:
+            cov = min(en, s["end"]) - max(st, s["start"])
+            if cov > best_cov:
+                best, best_cov = int(s["speaker"]), cov
+        if best is None:
+            # 没有覆盖：退化成「离哪个簇最近」
+            near = min(segs or [{"speaker": 0, "start": 0, "end": 0}],
+                       key=lambda s: min(abs(st - s["start"]), abs(st - s["end"])))
+            if min(abs(st - near["start"]), abs(st - near["end"])) > 1.5:
+                continue
+            best = int(near["speaker"])
+        out.setdefault(best, []).append((st, en, txt))
+    return out
+
+
 def samples_by_cluster(segs, rows, k=None):
     """→ [{cluster, samples:[...]}]，按簇号升序。给渲染层用，不进 decisions。"""
-    by = {}
+    by = assign_rows(segs, rows)
+    by_spans = {}
     for s in segs or []:
-        by.setdefault(int(s["speaker"]), []).append((s["start"], s["end"]))
-    return [{"cluster": spk, "samples": samples_for(spans, rows, k)}
-            for spk, spans in sorted(by.items())]
+        by_spans.setdefault(int(s["speaker"]), []).append((s["start"], s["end"]))
+    return [{"cluster": spk, "samples": samples_for(spans, by.get(spk, []), k)}
+            for spk, spans in sorted(by_spans.items())]
 
 
 if __name__ == "__main__":

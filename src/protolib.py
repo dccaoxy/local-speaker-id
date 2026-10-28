@@ -53,7 +53,15 @@ def _atomic_write(path: str, text: str) -> None:
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 def new_source_id(name: str) -> str:
@@ -120,6 +128,19 @@ def delete_source(sid: str) -> bool:
             os.remove(p)
             ok = True
     return ok
+
+
+def people_from_recording(rid: str) -> list[str]:
+    """谁的全部来源都来自这段录音。
+
+    用途：这段录音里认不出他们，是**规则如此**（不能自己给自己作证），
+    不是「库里没这个人」。界面上必须说清楚，否则用户会觉得系统把人忘了。
+    """
+    by_name: dict[str, list[str]] = {}
+    for m in list_sources().values():
+        by_name.setdefault(m.get("name", ""), []).append(m.get("recording") or "")
+    return sorted(n for n, recs in by_name.items()
+                  if n and recs and all(r == rid for r in recs))
 
 
 def list_sources_names() -> list[str]:

@@ -73,12 +73,15 @@ def scan(dir_path=None, now=None):
             continue                                    # 稳定时间不够
 
         rid = by_path.get(path)
-        if rid and recs[rid].get("status") not in (store.ST_FAILED, store.ST_DISCOVERED):
-            # 同一路径已知：文件没变就跳过；变了说明被替换，按新指纹重跑
+        if rid:
+            # 同一路径已知并且文件没变：无论什么状态都跳过。
+            # **失败也跳过**——自动重试会让坏文件每 5 秒进一次队列，
+            # 永远收敛不了（实测过：一段 24 分钟的录音因此被反复重跑）。
+            # 重试是用户的动作（页面上的「重试」），不是扫描器的动作。
             if recs[rid].get("size") == size and recs[rid].get("mtime") == mtime:
                 continue
         fp = store.fingerprint(path, size, mtime)
-        if fp in recs and recs[fp].get("status") not in (store.ST_FAILED,):
+        if fp in recs:
             recs[fp]["path"] = path                  # 重命名：身份不变，只更路径
             continue
 
