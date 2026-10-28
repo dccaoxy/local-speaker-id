@@ -184,6 +184,10 @@ class ClusterEvidence:
     reason: str | None = None        # 单值枚举，见 REASONS
     name: str | None = None
     ask: bool = False
+    proto_n: int = 0             # 该 top1 的原型窗数（原型质量分级用）
+    source_n: int = 0            # 该 top1 的独立来源数
+    verified: bool = False       # 跨来源自检是否通过
+    silent_ok: bool = True       # 是否获准静默（protolib.eligible(for_silent=True)）
     is_self_match: bool = False      # 注册音频自身当查询，台账里必须能剔除
 
 
@@ -219,6 +223,17 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
 
     protos = build_protos() if protos is None else protos
     names = [n for n, p in protos.items() if len(p)]
+    # 原型质量门控：低窗原型/未自检的人不进自动 top1 排名，但仍留在人工候选列表
+    silent_pool = None
+    try:
+        import protolib
+        _p, man = protolib.load_current()
+        if man.get("people"):
+            pool = protolib.eligible(man, for_silent=False)
+            names = [n for n in names if n in pool] or names
+            silent_pool = protolib.eligible(man, for_silent=True)
+    except Exception:
+        pass   # 还没有 protos 版本时回落旧路径，不影响可用性
     if names:
         # B[i, w] = 第 w 个查询窗与第 i 个人（其全部注册窗）的最大余弦
         B = np.stack([(q @ protos[n].T).max(axis=1) for n in names])
@@ -230,6 +245,8 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
             ev.second_name = names[int(order[1])]
             ev.s2 = round(float(med[order[1]]), 3)
         ev.m = round(ev.s1 - ev.s2, 3)
+        if silent_pool is not None:
+            ev.silent_ok = ev.top1 in silent_pool
         # 查询簇就是注册来源本身时 sim≡1.0，这种记录不能进阈值标定
         ev.is_self_match = ev.s1 >= 0.999
 
@@ -278,7 +295,8 @@ def decide_from_evidence(ev, dur_total=None, n_clusters=None, max_share=None):
 
     # 3. 四项全过 → 静默落名（稿子里用斜体，这是用户唯一能看出「机器认的」的信号）
     if (ev.s1 >= config.T_AUTO and ev.m >= config.MARGIN
-            and ev.rho >= config.RHO_MIN and ev.n_total >= config.N_MIN_AUTO):
+            and ev.rho >= config.RHO_MIN and ev.n_total >= config.N_MIN_AUTO
+            and ev.silent_ok):
         ev.name, ev.ask, ev.tier, ev.reason = ev.top1, False, "很像", None
         return ev
 

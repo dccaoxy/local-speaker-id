@@ -70,6 +70,14 @@ CAP = 1200                 # windows_of 的截断上限；win_pass_rate 的分�
 NEW_PER_REC_MAX = 3        # 新人卡张数上限（超出折叠，仍可展开认领，不丢弃）
 NEW_MIN_SEC = 60           # 新人簇最短时长
 
+# ── 原型质量分级 [PROVISIONAL] ──────────────────────────────────────────
+# 这三个数没有实测标定，是按「张彤 42 窗编码的是信道不是人」这一个案例外推的。
+# N_PROTO_EXCLUDE 只该剔除「样本量根本不够排名」的人；不要写成 sources<2 就剔除——
+# 现有三人全是单来源，那样库会瞬间归零。无人能当 top1 时全库都变「库里没这人」。
+N_PROTO_EXCLUDE = 50     # [PROVISIONAL] 原型窗数 < 50 → 不参与 top1 排名，但仍留在人工候选
+N_PROTO_MIN = 100        # [PROVISIONAL] < 100 → 可当 top1，禁静默
+N_SOURCE_MIN = 2         # [PROVISIONAL] < 2 → 可当 top1，禁静默（单来源无法与信道解耦）
+
 SEC_RULE_FACTOR = 0.3      # 出卡门槛 = min(SEC_RULE_CAP, 录音总长 × 本值)
 SEC_RULE_CAP = 60          # 只对出卡生效，不约束静默
 
