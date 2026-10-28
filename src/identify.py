@@ -12,7 +12,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections import defaultdict
 
 import numpy as np
@@ -29,9 +28,15 @@ MIN_DUR = config.MIN_DUR
 UNKNOWN = config.UNKNOWN
 
 
-def to_wav16k(src):
-    """任意音频 → 16k 单声道 wav（用 macOS 自带 afconvert，无需 ffmpeg）。"""
-    out = os.path.join(tempfile.mkdtemp(prefix="vp_"), "a.wav")
+def to_wav16k(src, out_dir=None):
+    """任意音频 → 16k 单声道 wav（用 macOS 自带 afconvert，无需 ffmpeg）。
+
+    out_dir 可以指定：守护进程里要放在自己的工作目录下，不能靠 TMPDIR——
+    系统临时目录被清理或不可写时，mkdtemp 会退到当前目录乱建随机目录。
+    """
+    d = out_dir or os.path.join(config.WORK_DIR, "_conv", str(os.getpid()))
+    os.makedirs(d, exist_ok=True)
+    out = os.path.join(d, "a.wav")
     if src.lower().endswith(".wav"):
         d, sr = sf.read(src, dtype="float32")
         if sr == 16000 and d.ndim == 1:
@@ -94,10 +99,10 @@ def _why(reason):
 
 def _atomic_write(path, text):
     """OneDrive 目录下必须 tmp + rename：同步进程会锁文件，用户也可能正开着看。"""
-    import tempfile
     d = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".vp_", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
+    os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
 

@@ -146,6 +146,8 @@ def test_api():
     api = winmatch.to_api(e)
     check("无 sim/second 字段", "sim" not in api and "second" not in api)
     check("无 second_name 字段", "second_name" not in api)
+    check("两选一只给两个人名，不给分数",
+          api.get("choose_between") is None or len(api["choose_between"]) == 2)
     check("无 rho/n_total 字段", "rho" not in api and "n_total" not in api)
     check("无 eff_sec 字段", "eff_sec" not in api)
     check("mixed 时 top1 置 null", api["top1"] is None)
@@ -181,6 +183,102 @@ def test_health():
     check("单位是秒", h["ask_min_seconds"] == float(config.N_MIN_ASK))
 
 
+def test_new_branches():
+    print("三支曾经永远不发生的 reason")
+    # 主力卡：0.36~0.44 且一致 → gray_zone（之前会全部落进 low_rho，文案说「前后不一致」）
+    e = ev(s1=0.40, s2=0.20, m=0.20, rho=0.90)
+    d(e, 600)
+    check("0.40 → gray_zone", e.reason == "gray_zone" and e.ask, e.reason)
+    api = winmatch.to_api(e)
+    check("gray_zone 给名字", api["top1"] == "甲")
+    check("gray_zone 主按钮是「是 X」或「选人」",
+          api["primary_action"] in ("yes_named", "choose"), api["primary_action"])
+
+    # 分数够但只有 45 个窗 → few_windows（之前落进 low_rho，界面上成了「不像同一个人」）
+    e = ev(s1=0.50, n_total=45, eff_sec=45)
+    d(e, 600)
+    check("分数高但窗少 → few_windows", e.reason == "few_windows" and e.ask, e.reason)
+    api = winmatch.to_api(e)
+    check("few_windows 露出秒数（唯一允许的数字）", api["few_seconds"] == 45, api["few_seconds"])
+    check("few_windows 主按钮要我确认", api["primary_action"] == "confirm", api["primary_action"])
+
+    # 分数够、窗够，但这个人的原型只有单来源 → weak_proto，不许静默
+    e = ev(s1=0.50, silent_ok=False)
+    d(e, 600)
+    check("原型不够格 → weak_proto 不静默", e.reason == "weak_proto"
+          and e.name is None and e.ask, (e.reason, e.name))
+
+    # 同一个人只能占一个簇：人工降级后给低分的那簇用 low_margin
+    e = ev(s1=0.50, m=0.01, can_one_click=True, proto_n=200, source_n=3, verified=True)
+    d(e, 600)
+    api = winmatch.to_api(e)
+    check("margin 不足 → low_margin 两选一", api["primary_action"] == "choose_one", api)
+    check("两选一给两个名字", api["choose_between"] == ["甲", "乙"], api["choose_between"])
+
+
+def test_protolib_tiers():
+    print("原型质量两档（50 剔除 / 100 禁静默）")
+    import protolib
+    man = {"people": {
+        "甲": {"n_win": 40, "n_sources": 3, "verified": True,
+               "enough_windows": False, "enough_sources": True},
+        "乙": {"n_win": 80, "n_sources": 1, "verified": False,
+               "enough_windows": False, "enough_sources": False},
+        "丙": {"n_win": 300, "n_sources": 1, "verified": False,
+               "enough_windows": True, "enough_sources": False},
+        "丁": {"n_win": 300, "n_sources": 2, "verified": True,
+               "enough_windows": True, "enough_sources": True},
+    }}
+    top1 = protolib.eligible(man, for_silent=False)
+    silent = protolib.eligible(man, for_silent=True)
+    check("40 窗被剔除出 top1", "甲" not in top1, top1)
+    check("80 窗仍可当 top1", "乙" in top1, top1)
+    check("单来源不可静默", silent == {"丁"}, silent)
+    check("剔除只看窗数，不看来源数（否则库会清空）", "乙" in top1 and "丙" in top1)
+
+
+def test_render_and_store():
+    print("渲染与台账")
+    import os as _os
+    import render, store
+    # 不用 tempfile：某些沙箱会拦 mkdtemp 的建/删。固定目录，测完留着也无害。
+    td = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                       ".pytest_tmp")
+    _os.makedirs(td, exist_ok=True)
+    store.config.STATE = _os.path.join(td, "state.json")
+    store.config.DECISIONS = _os.path.join(td, "decisions.jsonl")
+    open(store.config.DECISIONS, "w").close()
+
+    rec = {"rid": "r1", "title": "t", "duration": 600,
+           "clusters": [
+               {"cluster_id": 1, "duration_s": 400, "share": 0.66, "reason": "gray_zone",
+                "auto_name": "甲", "ask": True},
+               {"cluster_id": 0, "duration_s": 200, "share": 0.33, "reason": "few_match",
+                "auto_name": None, "ask": True}],
+           "segs": [{"start": 0, "end": 10, "speaker": 1}], "warnings": []}
+    labels, kinds = render.labels_for(rec, {})
+    check("自动认的标 auto", kinds[1] == "auto" and labels[1] == "甲", kinds)
+    check("未定按发言时长编 未知A", labels[0] == "未知A", labels)
+
+    store.append_decision({"rid": "r1", "cluster_id": 0, "verdict": "name", "name": "乙"})
+    labels, kinds = render.labels_for(rec, store.verdicts("r1"))
+    check("确认过的标 user", kinds[0] == "user" and labels[0] == "乙", kinds)
+
+    md = render.render(rec, store.verdicts("r1"))
+    check("确认的用粗体", "**乙**" in md)
+    check("自动的用斜体", "*甲*" in md)
+    check("稿子里解释两种字体", "斜体" in md)
+
+    store.append_decision({"rid": "r1", "cluster_id": 0, "kind": "revoke"})
+    check("撤销后该簇不再有判定", 0 not in store.verdicts("r1"))
+    check("撤销是追加（台账仍有两行）", len(store.all_decisions()) == 2)
+
+    store.append_decision({"rid": "r1", "cluster_id": 9, "verdict": "skip",
+                           "name": None, "shown": False})
+    st = store.stats()
+    check("shown=false 不进 B 类分母", st["cards_shown"] == 0, st)
+
+
 if __name__ == "__main__":
     test_is_overlap()
     test_order()
@@ -188,6 +286,9 @@ if __name__ == "__main__":
     test_api()
     test_asr()
     test_health()
+    test_new_branches()
+    test_protolib_tiers()
+    test_render_and_store()
     print()
     if FAILED:
         print(f"{len(FAILED)} 项失败：{FAILED}")

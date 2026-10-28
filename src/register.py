@@ -1,62 +1,82 @@
 #!/usr/bin/env python3
-"""注册一个人：把「某段录音里的某个簇」登记成某人的声纹来源。
+"""注册 / 管理声纹库（来源级，带纯度检查）。
 
-用法:
-  # 第一次注册（会自动创建 speakers.json）
-  python register.py --name 张三 --wav a.wav --segs a.segs.json --cluster 0
+  python register.py add --name 张三 --wav a16.wav --segs a.segs.json --cluster 0
+  python register.py list
+  python register.py status
+  python register.py delete --source-id 张三-20261028-... 
+  python register.py rebuild
 
-  # 同一个人可以登记多条来源（不同录音、不同设备），原型窗会自动合并
-  python register.py --name 张三 --wav b.wav --segs b.segs.json --cluster 2
-
-  # 查看当前已登记的人
-  python register.py --list
-
-注册完会清掉 winmatch 的原型缓存，下次打分自动重建。
+跟旧版的区别：入库前会算「注册片段本身是不是混合物」，不合格直接拒收。
+实测教训——把一个混着几个人的簇注册进库，等于给这个人配了一个「谁都像他」的原型，
+之后每个陌生人都会被他吸走，而界面上一切正常。
 """
 import argparse
 import json
-import os
+import sys
 
-import winmatch
+import config
+import enroll
+import protolib
+
+
+def cmd_add(a):
+    sid, rep = enroll.enroll(a.name, a.wav, a.segs, a.cluster,
+                             recording=a.recording or a.wav, strict=not a.force)
+    print(json.dumps(rep, ensure_ascii=False, indent=2))
+    if not sid:
+        sys.exit(1)
+    print("\n" + protolib.status())
+
+
+def cmd_list(_):
+    srcs = protolib.list_sources()
+    if not srcs:
+        print(f"库里还没有来源（{config.EMB_CACHE_DIR}）")
+        return
+    for name in sorted({m["name"] for m in srcs.values()}):
+        mine = [m for m in srcs.values() if m["name"] == name]
+        print(f"{name}: {len(mine)} 条来源，{sum(m['n_win'] for m in mine)} 窗")
+        for m in sorted(mine, key=lambda x: x["created_at"]):
+            print(f"    {m['source_id']}  {m['n_win']:>5} 窗  "
+                  f"录音={m.get('recording') or '—'}  簇={m.get('cluster')}")
+
+
+def cmd_delete(a):
+    ok = protolib.delete_source(a.source_id)
+    print("已删除" if ok else "没找到这个来源")
+    if ok:
+        print("version:", protolib.build_version())
+        print(protolib.status())
+
+
+def cmd_rebuild(_):
+    print("version:", protolib.build_version())
+    print(protolib.status())
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--name")
-    ap.add_argument("--wav")
-    ap.add_argument("--segs")
-    ap.add_argument("--cluster", type=int, default=0)
-    ap.add_argument("--list", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    add = sub.add_parser("add")
+    add.add_argument("--name", required=True)
+    add.add_argument("--wav", required=True, help="16k 单声道 wav")
+    add.add_argument("--segs", required=True, help="分离结果 .segs.json")
+    add.add_argument("--cluster", type=int, required=True)
+    add.add_argument("--recording", default="", help="这段音频对应的录音 id（剔除同源用）")
+    add.add_argument("--force", action="store_true", help="跳过纯度检查（不推荐）")
+    add.set_defaults(func=cmd_add)
+
+    sub.add_parser("list").set_defaults(func=cmd_list)
+    sub.add_parser("status").set_defaults(func=cmd_rebuild)
+    sub.add_parser("rebuild").set_defaults(func=cmd_rebuild)
+    d = sub.add_parser("delete")
+    d.add_argument("--source-id", required=True)
+    d.set_defaults(func=cmd_delete)
+
     a = ap.parse_args()
-
-    path = winmatch.SPEAKERS
-    db = winmatch.load_sources(path)
-
-    if a.list:
-        if not db:
-            print(f"还没有任何注册记录：{path}")
-        for name, parts in db.items():
-            print(f"{name}: {len(parts)} 条来源")
-            for p in parts:
-                print(f"    {os.path.basename(p['wav'])}  簇 {p.get('cluster', 0)}")
-        return
-
-    if not (a.name and a.wav and a.segs):
-        ap.error("需要 --name --wav --segs（或用 --list 查看）")
-    for f in (a.wav, a.segs):
-        if not os.path.exists(f):
-            raise SystemExit(f"文件不存在：{f}")
-
-    db.setdefault(a.name, []).append(
-        {"wav": os.path.abspath(a.wav), "segs": os.path.abspath(a.segs), "cluster": a.cluster})
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    json.dump(db, open(path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-    print(f"已登记 {a.name} → {path}")
-
-    if os.path.exists(winmatch.CACHE):
-        os.remove(winmatch.CACHE)
-        print("已清除原型缓存，下次打分自动重建")
+    a.func(a)
 
 
 if __name__ == "__main__":

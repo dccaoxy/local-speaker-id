@@ -26,12 +26,28 @@
 import os
 
 # ── 路径 ────────────────────────────────────────────────────────────────
-MODEL_DIR = os.environ.get("VP_MODEL_DIR", os.path.expanduser("~/.voiceprint/models"))
+def _guess_model_dir() -> str:
+    """模型目录：环境变量 > ~/.voiceprint/models > WorkBuddy 的模型缓存。
+
+    第二个默认值曾是错的：`~/.voiceprint/models` 在本机不存在，模型实际在
+    `~/.workbuddy/models/voiceprint`，新环境跑起来直接 "Load model failed"。
+    按顺序探测，找到就用，避免再写死一个不存在的路径。
+    """
+    cands = [os.path.expanduser("~/.voiceprint/models"),
+             os.path.expanduser("~/.workbuddy/models/voiceprint")]
+    for c in cands:
+        if os.path.exists(os.path.join(c, "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")):
+            return c
+    return cands[1]
+
+
+MODEL_DIR = os.environ.get("VP_MODEL_DIR") or _guess_model_dir()
 SEG_MODEL = os.path.join(MODEL_DIR, "sherpa-onnx-pyannote-segmentation-3-0", "model.onnx")
 EMB_MODEL = os.path.join(MODEL_DIR, "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
 
 # 合规红线：声纹向量、原型、decisions、state 只许落本地，绝不进 OneDrive。
-VP_ROOT = os.path.expanduser("~/.voiceprint")
+# VP_ROOT 可覆盖，是为了让测试能把整套状态放进临时目录，不污染真实库。
+VP_ROOT = os.path.expanduser(os.environ.get("VP_ROOT", "~/.voiceprint"))
 DB_DIR = os.environ.get("VP_DB", os.path.join(VP_ROOT, "db"))
 WORK_DIR = os.environ.get("VP_WORK", os.path.join(VP_ROOT, "work"))
 STATE = os.path.join(VP_ROOT, "state.json")
@@ -42,7 +58,8 @@ PROTOS_CURRENT = os.path.join(PROTOS_DIR, "CURRENT")
 EMB_CACHE_DIR = os.path.join(DB_DIR, "emb")       # L1：按来源的窗向量
 VOICES_DIR = os.path.join(DB_DIR, "voices")       # 注册时抽出的簇音频切片
 CLIP_CACHE_DIR = os.path.expanduser("~/Library/Caches/voiceprint")
-RECORDING_DIR = os.path.expanduser("~/OneDrive/数据库/录音")   # 只读，永不写入
+RECORDING_DIR = os.environ.get(
+    "VP_RECORDINGS", os.path.expanduser("~/OneDrive/数据库/录音"))   # 只往里写 .说话人.md
 
 
 def assert_not_onedrive(path):
@@ -78,6 +95,17 @@ N_PROTO_EXCLUDE = 50     # [PROVISIONAL] 原型窗数 < 50 → 不参与 top1 �
 N_PROTO_MIN = 100        # [PROVISIONAL] < 100 → 可当 top1，禁静默
 N_SOURCE_MIN = 2         # [PROVISIONAL] < 2 → 可当 top1，禁静默（单来源无法与信道解耦）
 
+# 入库前的纯度门槛。**和 RHO_MIN 不是同一个量，别混用**（混过一次，见下）：
+#   RHO_MIN  = 窗「指向同一个人」的比例，判的是查询簇像不像库里某人
+#   PURITY_MIN = 把簇的窗按时间切成前后两半，两半互相比的中位余弦，
+#                判的是「这一段前后是不是同一个人」
+# 实测（本机，同一段 24 分钟录音）：
+#   单人簇 A 0.584 / 单人簇 B 0.694 / 人工 50:50 混合 0.448
+# 所以 0.52 落在缝里。**只有 2 个纯样本 + 1 个合成混合样本**，属于 [PROVISIONAL]。
+# 它是次要把关：真正防「自己给自己作证」的是打分时剔除同录音来源，
+# 不是这道门（面试那次误判的簇纯度是 0.641，这道门拦不住）。
+PURITY_MIN = 0.52          # [PROVISIONAL]
+
 SEC_RULE_FACTOR = 0.3      # 出卡门槛 = min(SEC_RULE_CAP, 录音总长 × 本值)
 SEC_RULE_CAP = 60          # 只对出卡生效，不约束静默
 
@@ -89,9 +117,14 @@ COLLAPSE_SHARE = 0.70
 COLLAPSE_MIN_CLUSTERS = 3
 OVERLAP_ALERT = 0.15       # 同时间段多簇覆盖占比超过此值 → is_overlap（录音级预警）
 
+# 自动聚类后的合并：分离器常把一个人切成 2~3 个簇（换语气、换位置）。
+# 质心余弦高于此值就并成一个簇。0.85 只并「几乎肯定同一个人」的，
+# 低于这个值宁可留着让上层按 rho2 报「抢话」。
+CLUSTER_MERGE_COS = 0.85
+
 # ── 流水线 ──────────────────────────────────────────────────────────────
 THREADS = 4                # 实测 4 最快，8 慢 20%，10 慢 2.4 倍
-STABLE_SEC = 60            # 文件 size+mtime 连续这么多秒不变才认为同步完成
+STABLE_SEC = int(os.environ.get("VP_STABLE_SEC", "60"))  # 文件 size+mtime 连续这么多秒不变才认为同步完成
 LONG_AUDIO_SEC = 1800      # >30 分钟只打 long_audio_unreliable 标记，MVP 不切段
 VP_SEG_MIN_SEC = 1500      # 标定之后再启用的分流阈值（当前不生效）
 SEG_LEN, SEG_HOP = 360, 300

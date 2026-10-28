@@ -189,19 +189,70 @@ class ClusterEvidence:
     verified: bool = False       # 跨来源自检是否通过
     silent_ok: bool = True       # 是否获准静默（protolib.eligible(for_silent=True)）
     is_self_match: bool = False      # 注册音频自身当查询，台账里必须能剔除
+    can_one_click: bool = False      # 界面能不能给「是 X」一键按钮（原型质量门控）
 
 
-# 七支固定枚举，按优先级排列。前端按枚举查表出文案，不许自由文本。
-REASONS = ("isolation_broken", "mixed", "noisy", "mixed_weak",
-           "low_margin", "low_rho", "few_match", "too_short", "few_evidence")
+# 十支固定枚举，按优先级排列。前端按枚举查表出文案，不许自由文本。
+#
+# 命名以已提交代码为准，不再改名（改名要同时动代码+文档+接口三处，这轮已经付过代价）。
+# isolation_broken / too_short / few_evidence 不进卡片流，只进 md 或录音级黄条。
+REASONS = ("isolation_broken", "mixed", "mixed_weak", "noisy",
+           "low_margin", "few_windows", "weak_proto", "gray_zone",
+           "low_rho", "few_match", "too_short", "few_evidence")
 # 文案说「没有可靠的人」时 top1 必须为 null
 _NO_RELIABLE = {"mixed", "noisy", "mixed_weak", "few_match", "isolation_broken",
-                "few_evidence"}
+                "few_evidence", "low_rho"}
+# 主按钮：文案给了名字就给「是 X」，没给名字就只能「先留空」/「选人」
+_PRIMARY = {
+    "low_margin": "choose_one",     # 两选一
+    "few_windows": "confirm",       # 就按 X 记（我确认）
+    "weak_proto": "confirm",
+    "gray_zone": "yes_named",       # 是 X（带名字，但系统犹豫）
+    "low_rho": "skip",              # 先留空
+    "mixed": "skip",
+    "mixed_weak": "skip",
+    "noisy": "skip",
+    "few_match": "new_person",
+}
+
+
+
+def _usable_matrices(protos, prov, recording, man):
+    """取出每个人可用的原型矩阵，并剔除「来源就是本录音」的窗。
+
+    这一步是 §24 的主修法。面试录音那次事故：张彤的原型窗取自**这条录音本身**的
+    簇0，于是簇1 里像簇0 的窗全得 1.000，中位数被拉到 0.569，ρ 反而 0.994——
+    四条静默条件全部通过，把候选人静默签成了张彤。
+    「自己给自己作证」只能靠剔除同源窗来切断，调阈值救不了。
+    """
+    mats, meta = {}, {}
+    for name, p in protos.items():
+        if not len(p):
+            continue
+        m = prov.get(name) if prov else None
+        if m is not None and recording:
+            keep = np.array([str(x) != str(recording) for x in m])
+            if not keep.any():
+                continue          # 这个人的样本全部来自本录音 → 对这段不参与打分
+            mats[name] = p[keep]
+        else:
+            mats[name] = p
+        pm = (man or {}).get("people", {}).get(name, {})
+        meta[name] = {
+            "proto_n": int(len(mats[name])),
+            "source_n": int(pm.get("n_sources", 0)),
+            "verified": bool(pm.get("verified", False)),
+        }
+    return mats, meta
 
 
 def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
-                  protos=None, gate_db=None, ext=None):
-    """一个簇 → ClusterEvidence。ρ/ρ2 在同一个循环里算，零额外推理。"""
+                  protos=None, prov=None, man=None, gate_db=None, ext=None,
+                  recording=None):
+    """一个簇 → ClusterEvidence。ρ/ρ2 在同一个循环里算，零额外推理。
+
+    recording：本段录音的标识。给了就会剔除「来源＝本录音」的原型窗。
+    """
     gate_db = gate_db_of(audio, sr) if gate_db is None else gate_db
     wins = windows_of(audio, sr, spans, gate_db=gate_db)
     dur = sum(max(0.0, en - st) for st, en in spans)
@@ -221,32 +272,54 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
         ev.reason = "few_evidence"
         return ev
 
-    protos = build_protos() if protos is None else protos
-    names = [n for n, p in protos.items() if len(p)]
-    # 原型质量门控：低窗原型/未自检的人不进自动 top1 排名，但仍留在人工候选列表
-    silent_pool = None
-    try:
-        import protolib
-        _p, man = protolib.load_current()
-        if man.get("people"):
+    if protos is None:
+        try:
+            import protolib
+            p2, prov2, man2 = protolib.load_with_prov()
+            if p2:
+                protos, prov, man = p2, prov2, man2
+        except Exception:
+            pass
+    if protos is None:
+        protos = build_protos()
+
+    mats, meta = _usable_matrices(protos, prov, recording, man)
+    names = list(mats)
+    # 原型质量门控：低窗原型不参与自动 top1 排名，但仍留在人工候选列表里
+    if man and man.get("people"):
+        try:
+            import protolib
             pool = protolib.eligible(man, for_silent=False)
             names = [n for n in names if n in pool] or names
-            silent_pool = protolib.eligible(man, for_silent=True)
-    except Exception:
-        pass   # 还没有 protos 版本时回落旧路径，不影响可用性
+        except Exception:
+            pass
     if names:
         # B[i, w] = 第 w 个查询窗与第 i 个人（其全部注册窗）的最大余弦
-        B = np.stack([(q @ protos[n].T).max(axis=1) for n in names])
+        B = np.stack([(q @ mats[n].T).max(axis=1) for n in names])
         med = np.array([float(np.median(b)) for b in B])
         order = np.argsort(-med)
-        ev.top1 = names[int(order[0])]
-        ev.s1 = round(float(med[order[0]]), 3)
+        top1_idx = int(order[0])
+        ev.top1 = names[top1_idx]
+        ev.s1 = round(float(med[top1_idx]), 3)
         if len(order) > 1:
             ev.second_name = names[int(order[1])]
             ev.s2 = round(float(med[order[1]]), 3)
         ev.m = round(ev.s1 - ev.s2, 3)
-        if silent_pool is not None:
-            ev.silent_ok = ev.top1 in silent_pool
+
+        mt = meta.get(ev.top1, {})
+        ev.proto_n, ev.source_n = mt.get("proto_n", 0), mt.get("source_n", 0)
+        ev.verified = mt.get("verified", False)
+        if man and man.get("people"):
+            try:
+                import protolib
+                ev.silent_ok = ev.top1 in protolib.eligible(man, for_silent=True)
+            except Exception:
+                ev.silent_ok = False
+        else:
+            ev.silent_ok = False     # 没有版本信息 → 无法证明可静默，一律不静默
+        ev.can_one_click = (ev.proto_n >= config.N_PROTO_MIN
+                            and ev.source_n >= config.N_SOURCE_MIN
+                            and ev.verified)
         # 查询簇就是注册来源本身时 sim≡1.0，这种记录不能进阈值标定
         ev.is_self_match = ev.s1 >= 0.999
 
@@ -254,7 +327,6 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
         passed = best >= config.RHO_WIN_GATE
         ev.n_valid = int(passed.sum())
         ident = B.argmax(axis=0)
-        top1_idx = int(order[0])
         ev.rho = round(float(((ident == top1_idx) & passed).sum()) / len(q), 3)
         others = [(int(((ident == i) & passed).sum()), names[i])
                   for i in range(len(names)) if i != top1_idx]
@@ -273,10 +345,15 @@ def score_cluster(audio, sr, spans, cluster_id=0, dur_total=None,
 
 
 def decide_from_evidence(ev, dur_total=None, n_clusters=None, max_share=None):
-    """严格按 产品口径-终版 §1 的七步序列，命中即返回，不许并行判断。
+    """严格按 产品口径-终版 §1 的序列，命中即返回，不许并行判断。
 
     并行判断会让同一段录音跑两次显示不同理由——这是最容易被用户抓到的
     「这工具不靠谱」的证据。
+
+    与早期版本的差别（都是为了「每条 reason 都真的会发生」）：
+      · 补 gray_zone（0.36~0.44 是主力卡，之前全落进 low_rho，文案说错话）
+      · 补 few_windows（分数够、只是听得短）与 weak_proto（原型资格不足）
+      · rho2 ≥ 0.25 统一走 mixed，不再按 s1 分叉
     """
     d = dur_total if dur_total is not None else max(ev.duration_s, 1.0)
 
@@ -293,36 +370,53 @@ def decide_from_evidence(ev, dur_total=None, n_clusters=None, max_share=None):
 
     gated = ev.eff_sec >= config.card_gate(d)
 
-    # 3. 四项全过 → 静默落名（稿子里用斜体，这是用户唯一能看出「机器认的」的信号）
-    if (ev.s1 >= config.T_AUTO and ev.m >= config.MARGIN
-            and ev.rho >= config.RHO_MIN and ev.n_total >= config.N_MIN_AUTO
-            and ev.silent_ok):
-        ev.name, ev.ask, ev.tier, ev.reason = ev.top1, False, "很像", None
+    if ev.s1 >= config.T_ASK:
+        # 抢话优先：窗口大面积指向第二个人时，任何名字都给不准
+        if ev.rho2 >= 0.25:
+            ev.reason, ev.ask, ev.tier, ev.name = "mixed", True, "无", None
+            return ev
+        if ev.s1 >= config.T_AUTO:
+            # 分数已经很高，就不再受「出卡时长门槛」约束——门槛是防打扰的，
+            # 而这一档恰恰是「听得出像谁、只是他说得少」，问了最有价值。
+            # 早期版本在这里也套 gate，导致 few_windows 永远不会发生（N<60 必然不 gated）。
+            ev.tier = "很像"
+            if ev.rho < config.RHO_MIN:
+                ev.reason = "mixed_weak" if ev.rho2 >= 0.10 else "noisy"
+                ev.ask, ev.name = True, None
+                return ev
+            if ev.m < config.MARGIN:
+                ev.reason, ev.ask, ev.name = "low_margin", True, None
+                return ev
+            if ev.n_total < config.N_MIN_AUTO:
+                ev.reason, ev.ask, ev.name = "few_windows", True, None
+                return ev
+            if not ev.silent_ok:
+                # 分数够、但这个人只有单来源/窗数不足/跨录音自检未过。
+                # 静默署名是「不告诉用户就写名字」，必须要求证据干净。
+                ev.reason, ev.ask, ev.name = "weak_proto", True, None
+                return ev
+            ev.name, ev.ask, ev.reason = ev.top1, False, None
+            return ev
+        # 0.36 ≤ s1 < 0.44：占比最大的一批，宁可问一句
+        if not gated:
+            ev.reason, ev.ask, ev.tier, ev.name = "too_short", False, "无", None
+            return ev
+        ev.tier = "有点像"
+        ev.ask, ev.name = True, None
+        ev.reason = "low_rho" if ev.rho < config.RHO_MIN else "gray_zone"
         return ev
 
-    # 4. 过 T_ASK 且够长 → 疑似卡。reason 按优先级短路
-    if ev.s1 >= config.T_ASK and gated:
-        ev.ask, ev.tier, ev.name = True, ("很像" if ev.s1 >= config.T_AUTO else "有点像"), None
-        if ev.rho < config.RHO_MIN:
-            ev.reason = ("mixed" if ev.rho2 >= 0.25
-                         else ("noisy" if ev.rho2 < 0.10 else "mixed_weak"))
-        elif ev.m < config.MARGIN:
-            ev.reason = "low_margin"
-        else:
-            ev.reason = "low_rho"
-        return ev
-
-    # 5. 信号太糊：真录糊了，后面所有档都不该出卡
+    # 3. 分数低：先看信号质量，糊了就不问（问了也答不出来）
     if ev.win_pass_rate < config.WIN_PASS_MIN:
         ev.reason, ev.ask, ev.tier, ev.name = "noisy", False, "无", None
         return ev
 
-    # 6. 分低但信号干净 → 新人卡
+    # 4. 分低但信号干净且够长 → 库里没这人
     if gated and ev.duration_s >= config.NEW_MIN_SEC:
         ev.reason, ev.ask, ev.tier, ev.name = "few_match", True, "无", None
         return ev
 
-    # 7. 其余：静默标「说话人N」，可核实的短簇标 too_short
+    # 5. 其余：静默标「说话人N」
     ev.reason = "too_short" if not gated else None
     ev.ask, ev.tier, ev.name = False, "无", None
     return ev
@@ -331,8 +425,13 @@ def decide_from_evidence(ev, dur_total=None, n_clusters=None, max_share=None):
 def to_api(ev):
     """序列化给前端。**全禁数字**（含调试灰字）——接口层返 null，不靠前端自律。
 
-    唯一的例外是 duration_s 用于卡片统计行；eff_sec / N_total / s1 / ρ 都不出这个门。
+    唯一的例外是 duration_s（卡片统计行）与 few_windows 的秒数（口径 §19 明确
+    允许的孤例：前提是有效语音 < 60 秒，CAP 咬不到，用户能自行核实）。
     """
+    top1 = None if ev.reason in _NO_RELIABLE else ev.top1
+    primary = _PRIMARY.get(ev.reason, "choose")
+    if ev.reason in ("gray_zone", "low_margin") and not ev.can_one_click:
+        primary = "choose"        # 原型不达标：不给一键确认，但名字仍置顶
     return {
         "cluster_id": ev.cluster_id,
         "duration_s": ev.duration_s,
@@ -340,10 +439,17 @@ def to_api(ev):
         "state": "pending",
         "tier": ev.tier,
         "reason": ev.reason,
-        "top1": None if ev.reason in _NO_RELIABLE else ev.top1,
+        "top1": top1,
+        "choose_between": ([ev.top1, ev.second_name]
+                           if primary == "choose_one" and ev.top1 and ev.second_name
+                           else None),
+        "primary_action": primary,
+        "can_one_click": bool(ev.can_one_click),
+        "few_seconds": int(ev.eff_sec) if ev.reason == "few_windows" else None,
         "longest_span": list(ev.longest_span),
         "is_self_match": ev.is_self_match,
     }
+
 
 
 def is_overlap_of(segs, dur_total):

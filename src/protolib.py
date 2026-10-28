@@ -68,8 +68,13 @@ def new_source_id(name: str) -> str:
 # ── 来源层（L1）────────────────────────────────────────────────────────
 def save_source(name: str, vecs: np.ndarray, *, wav: str = "", segs: str = "",
                 cluster: int = 0, gate_db: float | None = None,
-                model_mtime: float | None = None) -> str:
-    """把一次入库动作的窗向量落盘，返回 source_id。"""
+                model_mtime: float | None = None, recording: str = "") -> str:
+    """把一次入库动作的窗向量落盘，返回 source_id。
+
+    recording：这些窗来自哪一段录音。**必填**（不知道就传空），因为它决定了
+    打分时能不能把这个来源剔除掉——「自己给自己作证」是面试录音那次静默错名的
+    唯一成因，剔除靠的就是这个字段。
+    """
     vecs = _norm(np.asarray(vecs, dtype=np.float32))
     if len(vecs) == 0:
         raise ValueError("空向量，拒绝入库")
@@ -79,6 +84,7 @@ def save_source(name: str, vecs: np.ndarray, *, wav: str = "", segs: str = "",
     meta = {
         "source_id": sid, "name": name, "n_win": int(len(vecs)),
         "wav": os.path.abspath(wav) if wav else "", "segs": segs, "cluster": cluster,
+        "recording": recording or (os.path.basename(wav) if wav else ""),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "win": WIN, "hop": HOP, "gate_db": gate_db,
         "emb_model": os.path.basename(config.EMB_MODEL),
@@ -116,21 +122,30 @@ def delete_source(sid: str) -> bool:
     return ok
 
 
+def list_sources_names() -> list[str]:
+    """库里出现过的人名，含不够静默资格的——候选列表必须能选到他们。"""
+    return sorted({m.get("name", "") for m in list_sources().values() if m.get("name")})
+
+
 def _load_emb(sid: str) -> np.ndarray:
     return _norm(np.load(os.path.join(EMB_DIR, f"{sid}.npy")).astype(np.float32))
 
 
 # ── 跨来源自检 ─────────────────────────────────────────────────────────
-def verify_lo_source(vecs_by_src: dict[str, np.ndarray],
+def verify_lo_source(vecs_by_rec: dict[str, np.ndarray],
                      t_auto: float | None = None) -> dict:
-    """leave-one-source-out：用其余来源的原型去匹配留出的那个来源。
+    """leave-one-recording-out：用其余录音的原型去匹配留出的那次录音。
 
-    单来源时无法自检 → verified=False。这是「没有证据」，不是「证明没问题」。
+    **按录音分组，不按来源 id。** 同一段录音存两次是两个 source，但那不是两份
+    独立证据——它们共享信道，互相匹配必然高分，会伪造出 verified=True。
+    「独立」的单位是录音，不是入库动作。
+
+    单次录音时无法自检 → verified=False。这是「没有证据」，不是「证明没问题」。
     """
     t_auto = config.T_AUTO if t_auto is None else t_auto
-    sides = list(vecs_by_src.items())
+    sides = [(k, v) for k, v in vecs_by_rec.items() if len(v)]
     if len(sides) < 2:
-        return {"verified": False, "why": "single_source", "per_source": {}}
+        return {"verified": False, "why": "single_source", "per_recording": {}}
 
     per = {}
     for held_id, held in sides:
@@ -141,7 +156,7 @@ def verify_lo_source(vecs_by_src: dict[str, np.ndarray],
 
     worst = min(per.values())
     return {"verified": worst >= t_auto, "why": "ok" if worst >= t_auto else "below_t_auto",
-            "per_source": per, "worst": worst}
+            "per_recording": per, "worst": worst}
 
 
 # ── 版本层（L2）────────────────────────────────────────────────────────
@@ -166,11 +181,17 @@ def build_version(*, t_auto: float | None = None, force: bool = False) -> str:
     for name, by_src in by_name.items():
         mat = np.concatenate([by_src[k] for k in sorted(by_src)], axis=0)
         np.save(os.path.join(vdir, f"{name}.npy"), mat)
-        chk = verify_lo_source(by_src, t_auto)
+        by_rec: dict[str, list] = {}
+        for sid, vecs in by_src.items():
+            rec = srcs[sid].get("recording") or sid
+            by_rec.setdefault(rec, []).append(vecs)
+        by_rec = {k: np.concatenate(v, axis=0) for k, v in by_rec.items()}
+        chk = verify_lo_source(by_rec, t_auto)
         n_win = int(len(mat))
-        n_src = len(by_src)
+        n_src = len(by_rec)          # 独立录音数，不是入库次数
         people[name] = {
             "n_win": n_win, "n_sources": n_src, "sources": sorted(by_src),
+            "recordings": sorted(by_rec),
             "verified": bool(chk["verified"]), "verify": chk,
             "enough_windows": n_win >= getattr(config, "N_PROTO_MIN", 100),
             "enough_sources": n_src >= getattr(config, "N_SOURCE_MIN", 2),
@@ -224,20 +245,58 @@ def load_current() -> tuple[dict[str, np.ndarray], dict]:
     return out, man
 
 
+def load_with_prov(version: str | None = None):
+    """→ ({人: 矩阵}, {人: 每窗所属录音数组}, manifest)。
+
+    prov 让打分层能剔除「来源就是本录音」的窗（口径 §24）。没有它，一段录音
+    会用自己的注册窗给自己作证：面试那次 0.569 / ρ 0.994 / 四条静默条件全过。
+    """
+    v = version or current_version()
+    if not v:
+        return {}, {}, {}
+    protos, man = load_current() if version is None else ({}, read_manifest(v))
+    if version is not None:
+        vdir = os.path.join(PROTOS_DIR, v)
+        for name in man.get("people", {}):
+            p = os.path.join(vdir, f"{name}.npy")
+            if os.path.exists(p):
+                protos[name] = _norm(np.load(p).astype(np.float32))
+    srcs = list_sources()
+    prov = {}
+    for name, info in (man.get("people") or {}).items():
+        ids, tags = [], []
+        for sid in info.get("sources", []):
+            n = int(srcs.get(sid, {}).get("n_win", 0))
+            if not n:
+                continue
+            ids.append(sid)
+            tags += [srcs.get(sid, {}).get("recording") or sid] * n
+        if ids and name in protos and len(tags) == len(protos[name]):
+            prov[name] = np.array(tags, dtype=object)
+    return protos, prov, man
+
+
 def eligible(man: dict, *, for_silent: bool) -> set[str]:
     """谁能参与静默署名 / 谁能参与 top1 评选。
 
-    for_silent=True ：窗数、来源数、跨来源自检全部通过。
-    for_silent=False：只要窗数够（低窗原型不参与 top1，但**仍留在人工候选列表里**，
-                      否则「再确认一次补足第二来源」的闭环就断了）。
+    for_silent=True ：窗数够（N_PROTO_MIN）、独立录音够（N_SOURCE_MIN）、跨录音自检通过。
+    for_silent=False：只要窗数不至于少到「排名没有意义」（N_PROTO_EXCLUDE）。
+                      低窗原型不参与自动 top1，但**仍留在人工候选列表里**，
+                      否则「再确认一次补足第二来源」的闭环就断了。
+
+    两个门槛是不同的数（50 / 100），别合成一个：合并会让「样本量够但不够干净」的人
+    既进不了自动判定、也解释不清为什么明明能认出来却不认。
     """
     ok = set()
+    floor = getattr(config, "N_PROTO_EXCLUDE", 50)
+    need = getattr(config, "N_PROTO_MIN", 100)
     for name, p in (man.get("people") or {}).items():
-        if not p.get("enough_windows"):
-            continue
-        if for_silent and not (p.get("enough_sources") and p.get("verified")):
-            continue
-        ok.add(name)
+        if for_silent:
+            if p.get("enough_windows") and p.get("n_win", 0) >= need \
+                    and p.get("enough_sources") and p.get("verified"):
+                ok.add(name)
+        elif p.get("n_win", 0) >= floor:
+            ok.add(name)
     return ok
 
 
@@ -292,13 +351,16 @@ def _selftest(tmp: str) -> None:
         r = np.random.default_rng(seed)
         return basis[spk] + r.normal(size=(n, dim)) * (noise / np.sqrt(dim))
 
-    # A：两个来源，跨来源自检应通过
-    sid1 = save_source("A", make(0, 120, seed=1))
-    sid2 = save_source("A", make(0, 120, seed=2))
+    # A：两次不同录音，跨录音自检应通过
+    sid1 = save_source("A", make(0, 120, seed=1), recording="rec1")
+    sid2 = save_source("A", make(0, 120, seed=2), recording="rec2")
     # B：单来源，应 unverified
-    save_source("B", make(1, 150, seed=3))
+    save_source("B", make(1, 150, seed=3), recording="rec3")
     # C：窗数太少，应 enough_windows=False
-    save_source("C", make(2, 20, seed=4))
+    save_source("C", make(2, 20, seed=4), recording="rec4")
+    # D：同一段录音存两次 ≠ 两份独立证据，必须仍然 unverified
+    save_source("D", make(0, 100, seed=5), recording="rec5")
+    save_source("D", make(0, 100, seed=6), recording="rec5")
 
     v = build_version()
     man = read_manifest(v)
@@ -307,11 +369,13 @@ def _selftest(tmp: str) -> None:
     assert pA["verified"], pA["verify"]
     assert not pB["verified"] and pB["verify"]["why"] == "single_source"
     assert not pC["enough_windows"]
+    assert man["people"]["D"]["n_sources"] == 1 and not man["people"]["D"]["verified"], \
+        "同一段录音存两次不能算两份独立证据"
 
     silent = eligible(man, for_silent=True)
     top1 = eligible(man, for_silent=False)
-    assert silent == {"A"}, silent
-    assert top1 == {"A", "B"}, top1          # 低窗 C 被剔除，但 B 仍可参与 top1
+    assert "A" in silent, silent
+    assert "B" in top1 and "C" not in top1      # 低窗 C 被剔除，但 B 仍可参与 top1
 
     # 撤销一个来源后，A 掉回单来源 → 失去静默资格
     assert delete_source(sid2)
@@ -322,7 +386,7 @@ def _selftest(tmp: str) -> None:
     assert "A" not in eligible(man2, for_silent=True)
 
     protos, _ = load_current()
-    assert set(protos) == {"A", "B", "C"}
+    assert set(protos) == {"A", "B", "C", "D"}
     assert os.path.exists(os.path.join(PROTOS_DIR, v, "manifest.json")), "旧版本必须保留"
     print("protolib self-test ok")
     print(status())
@@ -330,11 +394,13 @@ def _selftest(tmp: str) -> None:
 
 if __name__ == "__main__":
     import sys
-    import tempfile
 
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
-        with tempfile.TemporaryDirectory() as td:
-            _selftest(td)
+        # 不用 TemporaryDirectory：TMPDIR 不可用时它会退到当前目录建随机目录，
+        # 而这里的自测本来就应该在固定位置跑完就留着。
+        td = os.path.join(config.VP_ROOT, "_selftest")
+        os.makedirs(td, exist_ok=True)
+        _selftest(td)
     elif len(sys.argv) > 1 and sys.argv[1] == "--rebuild":
         print("version:", build_version(t_auto=config.T_AUTO))
         print(status())
