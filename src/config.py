@@ -52,6 +52,10 @@ DB_DIR = os.environ.get("VP_DB", os.path.join(VP_ROOT, "db"))
 WORK_DIR = os.environ.get("VP_WORK", os.path.join(VP_ROOT, "work"))
 STATE = os.path.join(VP_ROOT, "state.json")
 DECISIONS = os.path.join(VP_ROOT, "decisions.jsonl")
+# 实际监听端口。8765 经常被别的应用占着，app 会顺延，所以端口不能写死在任何
+# 客户端里（菜单栏哨兵靠这个文件找服务）。缺了它，哨兵会去连 8765 上那个
+# 恰好也在跑的别的服务，读到一串不相干的数字。
+PORT_FILE = os.path.join(VP_ROOT, "port")
 SPEAKERS = os.environ.get("VP_SPEAKERS", os.path.join(VP_ROOT, "speakers.json"))
 PROTOS_DIR = os.path.join(DB_DIR, "protos")
 PROTOS_CURRENT = os.path.join(PROTOS_DIR, "CURRENT")
